@@ -1,0 +1,2448 @@
+--[[
+    ╔══════════════════════════════════════════════════════════╗
+    ║              MODERN ROBLOX GUI LIBRARY                 ║
+    ║              Horizontal Tabs / Dark Gray               ║
+    ╚══════════════════════════════════════════════════════════╝
+
+    CREATE:
+        :CreateToggle()
+        :CreateSelect()
+        :CreateButton()
+        :CreateSlider()
+        :CreateTextbox()
+
+    NOTICE:
+        Library:CreateNotice({
+            Type = "YesNo"
+            Type = "OK"
+            Type = "Wait"
+            Type = "WaitX"
+            Type = "Textbox"
+        })
+]]
+
+-- ═══ SERVICES & GLOBALS ════════════════════════════════════════════════
+RunService        = game:GetService("RunService")
+Players           = game:GetService("Players")
+LocalPlayer       = Players.LocalPlayer
+Player            = Players.LocalPlayer
+UserInputService  = game:GetService("UserInputService")
+TweenService      = game:GetService("TweenService")
+CoreGui           = game:GetService("CoreGui")
+StarterGui        = game:GetService("StarterGui")
+StatsService      = game:GetService("Stats")
+ReplicatedStorage = game:GetService("ReplicatedStorage")
+Debris            = game:GetService("Debris")
+Lighting          = game:GetService("Lighting")
+TeleportService   = game:GetService("TeleportService")
+HttpService       = game:GetService("HttpService")
+
+pcall(function()
+    Config = {
+        AutoParry = false,
+        Accuracy = 100,
+        AutoAccuracy = false,
+        ParryCooldownValue = 0.12,
+        AutoCooldownParry = false,
+        wowcurve = 0.33,
+        huh = 1.04,
+        AutoSpam = false,
+        AutoSpamSpeed = 0.005,
+        DistanceTiming = 100
+    }
+end)
+
+local Auto_Parry = {}
+getgenv().ZX_Parry = getgenv().ZX_Parry or { Hooked = true, KeyTable = "Ball", Remote = true } -- เพิ่มบรรทัดนี้เพื่อสร้าง Table รองรับข้อมูล
+local lastParryTime = 0
+local parryCooldown = 0.035
+local lastHitTick = 0
+local lastTargetChecked = nil
+local rallyCounter = 0
+local lastBallPossession = nil
+local Last_Parry = 0
+local Cache_Update_Tick = 0
+local Last_Positions_Cache = {}
+
+-- ═══ ANTI-SPAM HIGH SPEED RALLY TRACKER ═══════════════════════════════
+local rallyTracker = {
+    lastTarget = nil,
+    counter = 0,
+    validRallies = 0,
+    lastChangeTick = 0
+}
+
+getgenv()._ZX_VelHistory = getgenv()._ZX_VelHistory or { ball = {}, player = {}, MAX_SAMPLES = 7 }
+local _ZX_VelHistory = getgenv()._ZX_VelHistory
+
+local function _ZX_pushVelSample(target, pos, vel)
+    local history = target == "ball" and _ZX_VelHistory.ball or _ZX_VelHistory.player
+    table.insert(history, 1, { pos = pos, vel = vel, t = tick() })
+    while #history > _ZX_VelHistory.MAX_SAMPLES do table.remove(history, #history) end
+end
+
+local function GetEmergencyDistance(speed)
+    -- เพิ่มตัวคูณตามความเร็วบอลจริงเพื่อให้ระบบกด Parry ล่วงหน้าอัตโนมัติในระดับมิลลิวินาที
+    local calculated = 10 + (speed * 0.12)
+    return math.clamp(calculated, 12, 65) -- ขยายเพดานสูงสุดเพิ่มเป็น 95 สตัดสำหรับบอลความเร็วสูง
+end
+
+function Auto_Parry.Get_Ball()
+    local bc = workspace:FindFirstChild("Balls") or workspace:FindFirstChild("TrainingBalls")
+    if bc then
+        for _, b in pairs(bc:GetChildren()) do
+            if b:IsA("BasePart") and (b:GetAttribute("realBall") or b:GetAttribute("target")) then 
+                return b 
+            end
+        end
+    end
+    
+    -- 🚨 [BALL RESPAWN REBOOT SYSTEM] 
+    -- เมื่อไม่เจอบอลในสนาม (จังหวะบอลลูกเก่าตาย / บอลกำลังเกิดใหม่) 
+    -- สั่งล้างสถานะล็อก คูลดาวน์ และคิวสแปมทุกประเภททิ้งทันที เพื่อบังคับให้เฟรมแรกของบอลลูกใหม่นับเป็น "ตีปกติ"
+    shared.ManualSpamActive = false
+    shared.LastSpamTime = 0
+    if shared.Clicked_Target_Name then 
+        shared.Clicked_Target_Name = nil 
+    end
+    
+    -- ⚡ ล้างกระดานข้อมูลล็อกฟิสิกส์ เพื่อสกัดกั้นปัญหากดเบิ้ลหลายคลิกพร้อมกัน (Anti-Multi Click)
+    if type(parryLocked) == "table" then table.clear(parryLocked) end
+    if type(lockTime) == "table" then table.clear(lockTime) end
+    if type(lastHitTicks) == "table" then table.clear(lastHitTicks) end
+    
+    -- สลับโหมดการคำนวณแพ็กเก็ตเน็ตเวิร์กกลับมาเป็นโหมดปกติ (isSpam = false)
+    lastParryTime = 0
+    
+    return nil
+end
+
+function Auto_Parry.Get_Balls()
+    local foundBalls = {}
+    local mainFolder = workspace:FindFirstChild("Balls")
+    local trainingFolder = workspace:FindFirstChild("TrainingBalls")
+    
+    if mainFolder then
+        for _, b in ipairs(mainFolder:GetChildren()) do
+            if b:IsA("BasePart") and (b:GetAttribute("realBall") or b:GetAttribute("target")) then
+                b.CanCollide = false
+                table.insert(foundBalls, b)
+            end
+        end
+    end
+    
+    if trainingFolder then
+        for _, b in ipairs(trainingFolder:GetChildren()) do
+            if b:IsA("BasePart") and (b:GetAttribute("realBall") or b:GetAttribute("target")) then
+                b.CanCollide = false
+                table.insert(foundBalls, b)
+            end
+        end
+    end
+    
+    return foundBalls
+end
+
+function Auto_Parry.GetTargetPlayer()
+    local alive = workspace:FindFirstChild("Alive")
+    local myChar = LocalPlayer.Character
+    local cam = workspace.CurrentCamera
+
+    if not alive or not myChar or not cam then return nil end
+
+    -- 🔒 ตรวจสอบระบบล็อกดับเบิ้ลคลิกก่อน
+    if Config.TargetMode == "Double click" and shared.Clicked_Target_Name then
+        local target = alive:FindFirstChild(shared.Clicked_Target_Name)
+        if target and target:IsA("Model") and target ~= myChar and target:FindFirstChild("HumanoidRootPart") then
+            return target
+        end
+    end
+
+    local viewport = cam.ViewportSize
+    local screenCenter = Vector2.new(viewport.X * 0.5, viewport.Y * 0.5)
+    local MAX_SCREEN_DISTANCE = math.min(viewport.X, viewport.Y) * 0.45
+
+    local bestTarget = nil
+    local bestScreenDistance = math.huge
+    local fallbackTarget = nil
+    local shortestWorldDist = math.huge
+
+    for _, target in ipairs(alive:GetChildren()) do
+        if target:IsA("Model") and target ~= myChar then
+            local hrp = target:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                local worldDist = (myChar.HumanoidRootPart.Position - hrp.Position).Magnitude
+                local screenPos, onScreen = cam:WorldToViewportPoint(hrp.Position)
+
+                if screenPos.Z > 0 then
+                    local screenDistance = (Vector2.new(screenPos.X, screenPos.Y) - screenCenter).Magnitude
+                    if screenDistance <= MAX_SCREEN_DISTANCE and screenDistance < bestScreenDistance then
+                        bestScreenDistance = screenDistance
+                        bestTarget = target
+                    end
+                end
+
+                -- [FIXED LOGIC]: เปลี่ยนระบบสุ่มเดาทาง เป็นหาผู้เล่นที่ยืนใกล้เราที่สุดในแมพแทนเพื่อความเสถียร
+                if worldDist < shortestWorldDist then
+                    shortestWorldDist = worldDist
+                    fallbackTarget = target
+                end
+            end
+        end
+    end
+
+    return bestTarget or fallbackTarget
+end
+
+local CachedParryTracks = {} 
+local LastParryAnimTime = 0   
+
+function Auto_Parry.Parry_Animation()
+    if not Config.SwordAnimationsEnabled then return end
+
+    local now = os.clock()
+    if now - LastParryAnimTime < 0.12 then return end
+    LastParryAnimTime = now
+
+    pcall(function()
+        local player = LocalPlayer or game.Players.LocalPlayer
+        local char = player and player.Character
+        if not char then return end
+
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        local animator = hum and hum:FindFirstChildOfClass("Animator")
+        if not animator then return end
+
+        local currentSword = char:GetAttribute("CurrentlyEquippedSword") or "Default"
+        local track = CachedParryTracks[currentSword]
+
+        if not track or not track.Animation or not track.Parent then
+            local parryAnimation = ReplicatedStorage.Shared.SwordAPI.Collection.Default:FindFirstChild("GrabParry")
+
+            if currentSword ~= "Default" then
+                local swordDataModule = ReplicatedStorage.Shared.ReplicatedInstances.Swords
+                local swordInstances = require(swordDataModule)
+                local swordInfo = swordInstances and swordInstances:GetSword(currentSword)
+                
+                if swordInfo and swordInfo["AnimationType"] then
+                    local animFolder = ReplicatedStorage.Shared.SwordAPI.Collection:FindFirstChild(swordInfo["AnimationType"])
+                    if animFolder then
+                        parryAnimation = animFolder:FindFirstChild("GrabParry") or animFolder:FindFirstChild("Grab") or parryAnimation
+                    end
+                end
+            end
+
+            if parryAnimation then
+                track = animator:LoadAnimation(parryAnimation)
+                track.Priority = Enum.AnimationPriority.Action
+                CachedParryTracks[currentSword] = track
+            end
+        end
+
+        if track then
+            track:Stop(0.02) 
+            track:Play(0.05, 0.65, 1.35) 
+        end
+    end)
+end
+
+-- 🧼 รีเซ็ตคลังเก็บเมื่อตัวละครเกิดใหม่ (ป้องกันข้อมูลแอนิเมชันเก่ายังค้างคาบัก)
+if LocalPlayer then
+    LocalPlayer.CharacterAdded:Connect(function()
+        table.clear(CachedParryTracks)
+    end)
+end
+
+function Auto_Parry.CalculateParryCFrame(ball, targetPlayer)
+    local cam = workspace.CurrentCamera
+    if not targetPlayer or not targetPlayer.PrimaryPart or not cam then
+        return targetPlayer and targetPlayer.PrimaryPart and targetPlayer.PrimaryPart.Position or Vector3.zero
+    end
+    
+    local targetPos = targetPlayer.PrimaryPart.Position
+    local targetHRP = targetPlayer.PrimaryPart
+    local myChar = game.Players.LocalPlayer.Character
+    local myHRP = myChar and myChar:FindFirstChild("HumanoidRootPart")
+    
+    local parryCurveMode = Config.ParryCurveMode or "Camera"
+    
+    -- [🎯 MAX OVERDRIVE 90 DEGREE & REVERSE MODE]
+    if parryCurveMode == "Camera" then
+        -- ล็อกเป้าหมายตามแกนมุมมองกล้อง Client แท้จริง ยิงหลบเสี้ยวตัด
+        return cam.CFrame.Position + (cam.CFrame.LookVector * 1000)
+    elseif parryCurveMode == "Left" then
+        -- หักเลี้ยวไปทางซ้ายของศัตรูแบบฉาก 90 องศา (จัดเต็มระยะ 500 สตัด เพื่อให้วิถีหักศอกชัดเจน)
+        return targetPos + (targetHRP.CFrame.RightVector * -500)
+    elseif parryCurveMode == "Right" then
+        -- หักเลี้ยวไปทางขวาของศัตรูแบบฉาก 90 องศา
+        return targetPos + (targetHRP.CFrame.RightVector * 500)
+    elseif parryCurveMode == "Up" then
+        -- งัดโด่งขึ้นฟ้าตรงๆ ข้ามหัวแนวบล็อก
+        return targetPos + Vector3.new(0, 1000, 0)
+    elseif parryCurveMode == "Down" then
+        -- [🔥 REVERSE TO MY BACK OVERDRIVE]
+        -- บอลจะพุ่งสวนศัตรูฉีกกลับไปที่ "ด้านหลังของตัวเราเอง" ทันที จัดเต็มระยะ 800 สตัด
+        if myHRP and targetPlayer.PrimaryPart then
+            local directionToEnemy = (targetPlayer.PrimaryPart.Position - myHRP.Position).Unit
+            -- ใช้ทิศทางตรงกันข้ามกับศัตรู (ติดลบ) แล้วยิงพิกัดออกจากตำแหน่งตัวเราไปข้างหลัง
+            return myHRP.Position + (-directionToEnemy * 800)
+        else
+            -- Fallback กรณีไม่เจอตัวละครเรา ให้พุ่งสวนแนวหน้ากล้องกลับไปข้างหลัง
+            return cam.CFrame.Position + (cam.CFrame.LookVector * -800)
+        end
+    elseif parryCurveMode == "Random" then
+        local randomAngle = math.rad(math.random(0, 360))
+        local randomX = math.cos(randomAngle) * math.random(350, 700)
+        local randomZ = math.sin(randomAngle) * math.random(350, 700)
+        local randomY = math.random(-400, 500)
+        
+        return targetPos + Vector3.new(randomX, randomY, randomZ)
+    elseif parryCurveMode == "Straight" then
+        return targetPos
+    
+        -- =======================================================================
+    -- 🌪️ [NEW MODE OVERDRIVE]: SUPER CURVE RANDOM (AUTO-RANDOMIZED ON EACH CALL)
+    -- =======================================================================
+    elseif parryCurveMode == "Super Curve Random" then
+        -- 🎲 ตัวจำลองเกตดักจับเฟรมตี (ป้องกันการสุ่มซ้ำซ้อนในมิลลิวินาทีเดียวกัน)
+        _G.LastCurveHitTick = _G.LastCurveHitTick or 0
+        _G.CurrentSuperCurveDirection = _G.CurrentSuperCurveDirection or "Left"
+
+        -- 🎰 ถ้าจดจำเวลาของเฟรมปัจจุบันต่างจากเฟรมล่าสุด แปลว่าฟังก์ชันถูก "เรียกใช้งานใหม่" (สั่งตีบอลรอบใหม่)
+        local currentTick = os.clock()
+        if currentTick ~= _G.LastCurveHitTick then
+            _G.LastCurveHitTick = currentTick
+            
+            -- บังคับสั่งสุ่มทิศทางใหม่ทันที 4 ด้านหลักตามที่คุณต้องการ
+            local directions = {"Left", "Right", "Up", "Down"}
+            _G.CurrentSuperCurveDirection = directions[math.random(1, #directions)]
+        end
+
+        -- 📐 ประมวลผลพิกัดหักมุมฉากตามทิศทางที่ถูกสุ่มขึ้นล่าสุด ณ เฟรมที่กดตีบอล
+        if _G.CurrentSuperCurveDirection == "Left" then
+            return targetPos + (targetHRP.CFrame.RightVector * -600)
+        elseif _G.CurrentSuperCurveDirection == "Right" then
+            return targetPos + (targetHRP.CFrame.RightVector * 600)
+        elseif _G.CurrentSuperCurveDirection == "Up" then
+            return targetPos + Vector3.new(0, 800, 0)
+        elseif _G.CurrentSuperCurveDirection == "Down" then
+            -- โหมดดิ่งพื้น/Reverse บังคับมุมยิงฉีกไปด้านหลังตัวเราเพื่อสร้างวิถีลูกเลี้ยวหักศอก
+            if myHRP then
+                local directionToEnemy = (targetPlayer.PrimaryPart.Position - myHRP.Position).Unit
+                return myHRP.Position + (-directionToEnemy * 700)
+            else
+                return cam.CFrame.Position + (cam.CFrame.LookVector * -700)
+            end
+        end
+    end
+    -- =======================================================================
+   
+    
+    return targetPos
+end
+
+Auto_Parry.CalculateParryCframe = Auto_Parry.CalculateParryCFrame
+
+-- =======================================================================
+-- 🔍 PART 1: GLOBAL SCOPE DECLARATION (FIXED SYNTAX 1156)
+-- =======================================================================
+isPCUser = not game:GetService("UserInputService").TouchEnabled
+hasNotifiedBypassFail = false
+
+-- ประกาศตัวแปรรับระนาบส่งข้อมูลด้านล่างเป็นแบบเคลียร์ค่ารอไว้ล่วงหน้า
+isBypassSupported = false
+_tokenize = nil
+_reverted = {}
+_original = {}
+_captured = nil
+
+pcall(function()
+    if getgc and debug.getupvalues and (getrawmetatable or debug.getrawmetatable) then
+        isBypassSupported = true
+    end
+end)
+
+-- 🛡️ [SMART IF-SUPPORT RE-ARRANGED]: จัดบล็อกให้สมบูรณ์ไม่มีคำสั่งพิมพ์ค้าง
+if not isBypassSupported then
+    print("[Invis Network]: Executor not supported for Bypass. Fallback active.")
+else
+    print("[Invis Network]: Executor Capability Verified. Running Interceptor.")
+
+    local replicated_storage = cloneref(game:GetService('ReplicatedStorage'))
+    local workspace = cloneref(game:GetService('Workspace'))
+
+    local _token = nil
+    for _, Function in getgc(true) do
+        if type(Function) ~= 'function' or not debug.info(Function, 's'):find('PRY', 1, true) then
+            continue
+        end
+
+        for _, value in debug.getupvalues(Function) do
+            if type(value) == 'function' then
+                print('Found PRY Token inside GC.')
+                _token = value
+                break
+            end
+        end
+        if _token then break end
+    end
+
+    if _token then
+        _tokenize = function(_remote_uid)
+            local time = tostring(math.floor(workspace:GetServerTimeNow() * 100))
+            local key = _token(_remote_uid, 'TIME')
+            local characters = table.create(#time)
+
+            for index = 1, #time do
+                characters[index] = string.char(bit32.bxor(
+                    (string.byte(time, index ) + index) % 256,
+                    string.byte(key, (index - 1) % #key + 1)
+                ))
+            end
+            return table.concat(characters)
+        end
+    end
+
+    local function _is_valid(args)
+        if type(args) ~= "table" then return false end
+        return type(args[2]) == "string" and type(args[4]) == "number" and typeof(args[5]) == "CFrame"
+    end
+
+    local function _hook(remote)
+        if not _reverted[remote] then
+            if not _original[getrawmetatable(remote)] then
+                _original[getrawmetatable(remote)] = true
+                local _meta = getrawmetatable(remote)
+                setreadonly(_meta, false)
+
+                local _old = _meta.__index
+                _meta.__index = function(self, key)
+                    if (key == 'FireServer' and self:IsA('RemoteEvent')) or
+                       (key == 'InvokeServer' and self:IsA('RemoteFunction')) then
+                        return function(_, ...)
+                            local _arguments = {...}
+                            if _is_valid(_arguments) then
+                                if not _reverted[self] then
+                                    _reverted[self] = _arguments
+                                    _captured = {
+                                        remote = self,
+                                        args = _arguments
+                                    }
+                                end
+                            end
+                            return _old(self, key)(_, unpack(_arguments))
+                        end
+                    end
+                    return _old(self, key)
+                end
+                setreadonly(_meta, true)
+            end
+        end
+    end
+
+    for _, _remote in pairs(replicated_storage:GetDescendants()) do
+        if _remote:IsA('RemoteEvent') or _remote:IsA('RemoteFunction') then
+            _hook(_remote)
+        end
+    end
+end
+
+-- ===== SAFE INPUT FOR PC BYPASS FALLBACK =====
+function fireParryInput()
+	if mouse1press and mouse1release then
+		pcall(function()
+			mouse1press()
+			task.wait(0.03)
+			mouse1release()
+		end)
+		return true
+	end
+	if mouse1click then
+		pcall(function() mouse1click() end)
+		return true
+	end
+	return false
+end
+
+Config.ParryMethodMode = "bypass"
+
+-- 🔒 บังคับล็อกสถานะหากตัวรันมีประสิทธิภาพไม่ถึงเกณฑ์ขั้นต่ำ
+if not isBypassSupported then
+    Config.ParryMethodMode = "click"
+end
+
+-- 🚀 [FIXED NETWORK PIPELINE]: เวอร์ชั่นอัปเดตระยะ 37 Studs พร้อมระบบเปิด/ปิด Clash target
+function Auto_Parry.FireParryRemote(isSpam)
+    if type(Auto_Parry.Parry_Animation) == "function" then
+        pcall(Auto_Parry.Parry_Animation)
+    end
+
+    local mustUseMouseClick = false
+
+    if Config.ParryMethodMode == "click" then
+        mustUseMouseClick = true
+    elseif (not _reverted or next(_reverted) == nil) then
+        mustUseMouseClick = true
+        if not hasNotifiedBypassFail then
+            hasNotifiedBypassFail = true
+            if type(CustomNotify) == "function" then
+                CustomNotify("⚠️ Network Bypass not ready yet! Using Mouse/Touch Click instead.", 4)
+            end
+        end
+    end
+
+    if mustUseMouseClick then
+        fireParryInput()
+        return 
+    end
+    
+    local ball = Auto_Parry.Get_Ball()
+    local cam = workspace.CurrentCamera
+    if not cam then return end
+
+    local finalCamCFrame = cam.CFrame
+    local activeTargetPlayer = Auto_Parry.GetTargetPlayer()
+    
+    local character = game.Players.LocalPlayer.Character
+    local myHrp = character and character:FindFirstChild("HumanoidRootPart")
+    local isTargetTooClose = false
+    
+    if Config.ClashTarget and myHrp and activeTargetPlayer and activeTargetPlayer:FindFirstChild("HumanoidRootPart") then
+        local distanceToTarget = (myHrp.Position - activeTargetPlayer.HumanoidRootPart.Position).Magnitude
+        if distanceToTarget <= 37 then
+            isTargetTooClose = true
+        end
+    end
+
+    -- [⚡ FIXED CAMERA INTERCEPTOR]: บังคับอัปเดตมุมมองหลอกเซิร์ฟเวอร์ทุกสเตท เพื่อให้วิถี Curve ทำงาน 100%
+    if activeTargetPlayer and activeTargetPlayer.Name ~= game.Players.LocalPlayer.Name and not isTargetTooClose then
+        local calculatedCFrameData = Auto_Parry.CalculateParryCFrame(ball, activeTargetPlayer)
+        if calculatedCFrameData then
+            local finalPositionVector3 = Vector3.zero
+            if typeof(calculatedCFrameData) == "CFrame" then
+                finalPositionVector3 = calculatedCFrameData.Position
+            elseif typeof(calculatedCFrameData) == "Vector3" then
+                finalPositionVector3 = calculatedCFrameData
+            end
+            -- ล็อกตำแหน่งกล้อง Client ไปหาพิกัดเวกเตอร์เลี้ยวใหม่โดยตรง
+            finalCamCFrame = CFrame.lookAt(cam.CFrame.Position, finalPositionVector3)
+        end
+    end
+
+    local gamePositionsSnapshot = {}
+    local aliveFolder = workspace:FindFirstChild("Alive")
+    local deadFolder = workspace:FindFirstChild("Dead")
+    local isLobbyTraining = game.Players.LocalPlayer:GetAttribute("LobbyTraining") or false
+
+    if isLobbyTraining and deadFolder then
+        for _, deadModel in ipairs(deadFolder:GetChildren()) do
+            local plrs = game.Players:GetPlayerFromCharacter(deadModel)
+            if plrs and plrs:GetAttribute("LobbyTraining") and deadModel:FindFirstChild("HumanoidRootPart") then
+                local screenPos, onScreen = cam:WorldToScreenPoint(deadModel.HumanoidRootPart.Position)
+                gamePositionsSnapshot[deadModel.Name] = screenPos
+            end
+        end
+        local CollectionService = game:GetService("CollectionService")
+        for _, trainingTarget in ipairs(CollectionService:GetTagged("LobbyTrainingTarget")) do
+            if trainingTarget:IsA("BasePart") then
+                local screenPos, onScreen = cam:WorldToScreenPoint(trainingTarget.Position)
+                gamePositionsSnapshot[trainingTarget.Name] = screenPos
+            end
+        end
+    else
+        if aliveFolder then
+            for _, aliveChar in ipairs(aliveFolder:GetChildren()) do
+                if aliveChar:IsA("Model") and aliveChar:FindFirstChild("HumanoidRootPart") then
+                    -- คำนวณพิกัดตำแหน่งหน้าจออัปเดตให้สัมพันธ์กับค่า CFrame หลอก เพื่อไม่ให้วิถีสะบัดเบี้ยว
+                    local screenPos, onScreen = cam:WorldToScreenPoint(aliveChar.HumanoidRootPart.Position)
+                    gamePositionsSnapshot[aliveChar.Name] = screenPos
+                end
+            end
+        end
+    end
+
+    for _remote, _originalArgs in pairs(_reverted) do
+        if type(_originalArgs) == "table" and _originalArgs ~= nil then
+            task.spawn(function()
+                local finalCoordinates = {cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2}
+
+                if Config.UseMouseLocation then
+                    local mousePos = UserInputService:GetMouseLocation()
+                    finalCoordinates = {mousePos.X, mousePos.Y}
+                end
+
+                pcall(function()
+                    if _remote:IsA("RemoteEvent") then
+                        _remote:FireServer(
+                            _originalArgs[1],            
+                            _originalArgs[2],            
+                            _tokenize(_originalArgs[2]), 
+                            isSpam and 0 or 0.5,     
+                            finalCamCFrame,   -- ส่ง CFrame โค้งหักศอกชุดใหม่           
+                            gamePositionsSnapshot,       
+                            finalCoordinates,            
+                            false                        
+                        )
+                    end
+                end)
+            end)
+        end
+    end
+end
+
+function Auto_Parry.Is_Curved(ball)
+    local success, isCurved = pcall(function()
+        if not ball or not ball:IsA("BasePart") then return false end
+        local char = LocalPlayer.Character
+        if not char or not char:FindFirstChild("HumanoidRootPart") then return false end
+
+        local hrp = char.HumanoidRootPart
+        local ballVel = ball.AssemblyLinearVelocity
+        if ballVel.Magnitude < 1 then return false end
+
+        local dirToPlayer = (hrp.Position - ball.Position).Unit
+        local ballDir = ballVel.Unit
+        local dot = ballDir:Dot(dirToPlayer)
+
+        -- ขยายช่วง Dot Product เพื่อดักมุมเลี้ยวโค้งด้านข้างที่กว้างขึ้น
+return (dotProduct < 0.79 and dotProduct > -0.77)
+    end)
+
+    return success and isCurved or false
+end
+
+function Auto_Parry.IsTargetingMe(ball)
+    if not ball then return false end
+    
+    -- ดึงค่า Target จาก Attribute ของลูกบอล
+    local targetName = tostring(ball:GetAttribute("target") or ball:GetAttribute("Target") or "")
+    local localName = LocalPlayer.Name
+    
+    if targetName == localName then 
+        return true 
+    end
+    if LocalPlayer.Character and targetName == LocalPlayer.Character.Name then 
+        return true 
+    end
+    
+    return false
+end
+
+-- ═══ SKIN CHANGER BACKEND SYSTEM ═══════════════
+getgenv().skinChanger = false
+getgenv().swordModel = ""
+getgenv().swordAnimations = ""
+getgenv().swordFX = ""
+
+task.spawn(function()
+    local rs = ReplicatedStorage
+    local swordInstancesInstance = rs:WaitForChild("Shared", 9e9):WaitForChild("ReplicatedInstances", 9e9):WaitForChild("Swords", 9e9)
+    local swordInstances = require(swordInstancesInstance)
+
+    local swordsController
+    task.spawn(function()
+        while task.wait() and not swordsController do
+            local ok, conns = pcall(getconnections, rs.Remotes.FireSwordInfo.OnClientEvent)
+            if ok and conns then
+                for _, v in ipairs(conns) do
+                    if v.Function and islclosure and islclosure(v.Function) then
+                        local ok2, up = pcall(getupvalues, v.Function)
+                        if ok2 and #up == 1 and type(up[1]) == "table" then
+                            swordsController = up[1]
+                            break
+                        end
+                    end
+                end
+            end
+        end
+    end)
+
+    local function getSlashName(swordName)
+        local ok, sln = pcall(function() return swordInstances:GetSword(swordName) end)
+        return (ok and sln and sln.SlashName) or "SlashEffect"
+    end
+
+    local function refreshSlashName()
+        local fxName = getgenv().swordFX ~= "" and getgenv().swordFX or getgenv().swordModel
+        if fxName ~= "" then getgenv().slashName = getSlashName(fxName) else getgenv().slashName = "SlashEffect" end
+    end
+
+    local function setSword()
+        if not getgenv().skinChanger then return end
+        if not LocalPlayer.Character then return end
+        pcall(function()
+            local f = rawget(swordInstances, "EquipSwordTo")
+            if type(f) == "function" then
+                local ups = getupvalues(f)
+                for i = 1, #ups do if type(ups[i]) == "boolean" then setupvalue(f, i, false) break end end
+            end
+        end)
+        pcall(function() swordInstances:EquipSwordTo(LocalPlayer.Character, getgenv().swordModel) end)
+        task.spawn(function()
+            local attempts = 0
+            while not swordsController and attempts < 20 do task.wait(0.5); attempts = attempts + 1 end
+            if not swordsController then return end
+            pcall(function()
+                if swordsController.SetSword then
+                    swordsController:SetSword(getgenv().swordAnimations ~= "" and getgenv().swordAnimations or getgenv().swordModel)
+                end
+            end)
+            pcall(function()
+                local targetSword = getgenv().swordFX ~= "" and getgenv().swordFX or getgenv().swordModel
+                if rs.Remotes:FindFirstChild("FireSwordInfo") then rs.Remotes.FireSwordInfo:FireServer(targetSword) end
+                if swordsController.currentSword ~= nil then swordsController.currentSword = targetSword end
+                if swordsController.SwordFX ~= nil then swordsController.SwordFX = targetSword end
+            end)
+        end)
+    end
+
+    -- Hook ParrySuccessAll for FX Override
+    local hookedFuncs = {}
+    task.spawn(function()
+        while task.wait(1) do
+            local ok, conns = pcall(getconnections, rs.Remotes.ParrySuccessAll.OnClientEvent)
+            if ok and type(conns) == "table" then
+                for _, v in ipairs(conns) do
+                    local func = v.Function
+                    if func and not hookedFuncs[func] then
+                        if isourclosure and isourclosure(func) then 
+                            hookedFuncs[func] = true
+                        else
+                            hookedFuncs[func] = true
+                            v:Disable()
+                            local targetFunc = func
+                            local ourFunc
+                            ourFunc = function(...)
+                                local args = { ... }
+                                if tostring(args[4]) == LocalPlayer.Name and getgenv().skinChanger then
+                                    local fxSword = getgenv().swordFX ~= "" and getgenv().swordFX or getgenv().swordModel
+                                    refreshSlashName()
+                                    args[1] = getgenv().slashName
+                                    args[3] = fxSword
+                                end
+                                if setthreadidentity then pcall(setthreadidentity, 2) end
+                                pcall(targetFunc, unpack(args))
+                            end
+                            hookedFuncs[ourFunc] = true
+                            rs.Remotes.ParrySuccessAll.OnClientEvent:Connect(ourFunc)
+                        end
+                    end
+                end
+            end
+        end
+    end)
+
+    getgenv().updateSword = function() refreshSlashName(); setSword() end
+
+    -- Persistent Sync Loop
+    task.spawn(function()
+        while task.wait(1) do
+            if getgenv().skinChanger and getgenv().swordModel ~= "" then
+                local char = LocalPlayer.Character
+                if char then
+                    if LocalPlayer:GetAttribute("CurrentlyEquippedSword") ~= getgenv().swordModel then setSword() end
+                    if not char:FindFirstChild(getgenv().swordModel) then setSword() end
+                    for _, v in char:GetChildren() do
+                        if v:IsA("Model") and v.Name ~= getgenv().swordModel then v:Destroy() end
+                        task.wait()
+                    end
+                end
+            end
+        end
+    end)
+
+    LocalPlayer.CharacterAdded:Connect(function()
+        if getgenv().skinChanger then
+            getgenv().skinChanger = false; task.wait(1.5)
+            getgenv().skinChanger = true; task.wait(0.5)
+            pcall(function() getgenv().updateSword() end)
+        end
+    end)
+end)
+
+-- 📦 State Tables & Memory Buffers
+parryLocked = parryLocked or {}
+lockTime = lockTime or {}
+lastHitTicks = lastHitTicks or {}
+lastParryTime = lastParryTime or 0
+_clashStartTime = _clashStartTime or 0
+shared.ManualSpamActive = shared.ManualSpamActive or false
+activeClashBall = nil
+clashPartner = ""
+velocityHistory = {} -- คลังจดจำวิถีความเร็วแบบ Real-timeต่อเฟรม
+
+-- เอาไปวางไว้ด้านบนสุด ด้านใน shared._PhysicsBind ทันทีหลังจากประกาศ local parryLocked
+shared.InvisClearLock = function(targetBall)
+    if targetBall and parryLocked and lockTime then
+        parryLocked[targetBall] = false
+        lockTime[targetBall] = 0
+    end
+end
+
+-- 📡 1. PING LISTENER FOR DYNAMIC TIMING COMPENSATION
+local pingSeconds = 0.03
+task.spawn(function()
+    while true do
+        pcall(function()
+            if StatsService then
+                local network = StatsService:FindFirstChild("Network")
+                if network then
+                    local serverStats = network:FindFirstChild("ServerStatsItem")
+                    if serverStats then
+                        local dataPing = serverStats:FindFirstChild("Data Ping")
+                        if dataPing then
+                            pingSeconds = math.clamp((dataPing:GetValue() or 30) / 1000, 0.01, 0.3)
+                        end
+                    end
+                end
+            end
+        end)
+        task.wait(0.5)
+    end
+end)
+
+-- 📦 2. VELOCITY INTEGRATION FALLBACK
+if type(_ZX_pushVelSample) ~= "function" then
+    getgenv()._ZX_VelHistory = getgenv()._ZX_VelHistory or {}
+    getgenv()._ZX_pushVelSample = function(key, pos, vel)
+        _ZX_VelHistory[key] = _ZX_VelHistory[key] or {}
+        table.insert(_ZX_VelHistory[key], 1, {pos = pos, vel = vel, time = os.clock()})
+        if #_ZX_VelHistory[key] > 5 then
+            table.remove(_ZX_VelHistory[key])
+        end
+    end
+end
+
+-- 🛡️ 3. EMERGENCY DEFENSE OVERWRITE
+function SafeGetEmergencyDistance(speed)
+    local calculated = 8 + (speed * 0.09) + (pingSeconds * speed * 1.5)
+    -- กำหนดเพดานระยะฉุกเฉินสูงสุดที่ 25
+    local infinityBuffer = math.clamp(calculated, 10, 50) 
+    if type(GetEmergencyDistance) == "function" then
+        local success, result = pcall(GetEmergencyDistance, speed)
+        if success and type(result) == "number" then
+            -- บังคับไม่ให้ค่าเกิน 25
+            return math.min(math.max(result, math.clamp(8 + (speed * 0.09), 10, 45)), 40)
+        end
+    end
+    return infinityBuffer
+end
+
+-- 🎯 4. STABLE OBJECT RESOLVER
+local function SafeGetBalls()
+    local balls = {}
+    if type(Auto_Parry) == "table" then
+        if type(Auto_Parry.Get_Balls) == "function" then
+            local success, res = pcall(Auto_Parry.Get_Balls)
+            if success then
+                if type(res) == "table" then balls = res
+                elseif res and typeof(res) == "Instance" then balls = {res} end
+            end
+        elseif type(Auto_Parry.Get_Ball) == "function" then
+            local success, res = pcall(Auto_Parry.Get_Ball)
+            if success then
+                if type(res) == "table" then
+                    balls = res
+                elseif res and typeof(res) == "Instance" then
+                    balls = {res}
+                end
+            end
+        end
+    end
+    return balls
+end
+
+local singularityEndTime = 0
+local lastAutoSpamTime = 0
+-- =======================================================================
+-- 🚀 HYBRID HARDCORE OVERDRIVE SPAM LOOP (REAL-TIME SPEED UPDATE)
+-- =======================================================================
+if shared._BBAChaoticThread then 
+    task.cancel(shared._BBAChaoticThread) 
+    shared._BBAChaoticThread = nil 
+end
+
+shared._BBAChaoticThread = task.spawn(function()
+    while shared._InvisRunning do
+        -- [DYNAMIC INTERPOLATION]: ต้องดึงค่าสปีดมาคำนวณล่วงหน้าตั้งแต่บรรทัดแรกของรอบลูปเลย
+        local currentDelay = tonumber(Config.AutoSpamSpeed) or 0.005
+        
+        local cfg = (type(Config) == "table") and Config or {}
+        local autoSpamEnabled = cfg.AutoSpam or cfg.AutoSpamClash or false
+        
+        if not autoSpamEnabled then
+            shared.ManualSpamActive = false
+            _clashStartTime = 0
+        end
+
+        -- ตรวจสอบเงื่อนไขปะทะ
+        if autoSpamEnabled and shared.ManualSpamActive then
+            if type(Auto_Parry) == "table" and type(Auto_Parry.FireParryRemote) == "function" then
+                pcall(Auto_Parry.FireParryRemote, true)
+                pcall(Auto_Parry.FireParryRemote, true)
+            end
+        end
+        
+        -- หน่วงเวลาผันแปรตามดีเลย์หน้า GUI จริงแบบเสี้ยววินาที
+        task.wait(currentDelay) 
+    end
+end)
+
+local lastTornadoTracked = nil
+local tornadoResumeTime = 0
+_G.TornadoActive = false
+
+local LockedSingularBall = nil 
+local LastSingularState = false
+
+local function IsMySingularityActive()
+    local char = game.Players.LocalPlayer.Character
+    if char and char.Parent == workspace.Alive then
+        -- 🔮 เช็คค่า Attribute จากสคริปต์เซิร์ฟเวอร์เกม บอลจะถูกดูดเข้าหลุมดำเราโดยไม่กด Parry ตัดหน้า
+        if char:GetAttribute("IS_EVENT_SINGULARITY") == true then
+            return true
+        end
+    end
+    return false
+end
+
+LastSingularityActiveTime = 0
+SingularityCooldownBuffer = 0.1
+
+-- =======================================================================
+-- 🚀 NEW INVIS PHYSICS ENGINE (INVIS 1.00.12 OVERDRIVE EDITION)
+-- =======================================================================
+
+-- ประกาศสเตตัสตัวแปรหลักสำหรับระบบจำลอง
+Config.AutoParry = false
+Config.Accuracy = 100
+Config.AutoAccuracy = false
+Config.ParryCooldownValue = 0.07
+Config.AutoCooldownParry = false
+Config.huh = 0.716
+Config.DistanceTiming = 100
+
+if not parryLocked then parryLocked = {} end
+-- =======================================================================
+-- 🚀 NEW ERYNDOR-STYLE PHYSICS PARRY BIND (WITH +0.2s PREDICTION BUFFER)
+-- =======================================================================
+
+-- เตรียมโต๊ะข้อมูลให้อยู่ใน Scope ที่ระบบเข้าถึงได้ (หากยังไม่ได้สร้างไว้ด้านบน)
+parryLocked = parryLocked or {}
+lockTime = lockTime or {}
+WasTargetingMeLastFrame = WasTargetingMeLastFrame or {}
+BallFirstTargetDistanceMap = BallFirstTargetDistanceMap or {}
+
+if shared._PhysicsParryBind then 
+    shared._PhysicsParryBind:Disconnect() 
+end
+
+-- =======================================================================
+-- 🚀 ERYNDOR-STYLE PHYSICS PARRY BIND (ACCURACY & DISTANCE TIMING DRIVEN)
+-- =======================================================================
+
+-- เตรียมตารางข้อมูลระบบล็อก (Scope Global/Shared)
+parryLocked = parryLocked or {}
+lockTime = lockTime or {}
+WasTargetingMeLastFrame = WasTargetingMeLastFrame or {}
+BallFirstTargetDistanceMap = BallFirstTargetDistanceMap or {}
+
+if shared._PhysicsParryBind then 
+    shared._PhysicsParryBind:Disconnect() 
+end
+
+shared._PhysicsParryBind = RunService.RenderStepped:Connect(function()
+    -- 1. ตรวจสอบความพร้อมของตัวละครเรา (Son)
+    local Son = game.Players.LocalPlayer.Character
+    if not Son or not Son:FindFirstChild("HumanoidRootPart") then return end
+    if Son:GetAttribute("Stunned") or Son:GetAttribute("DoNotParry") then return end
+    
+    -- 2. ดึงข้อมูลคลังลูกบอลทั้งหมดในสนาม
+    local activeBalls = {}
+    if type(Auto_Parry) == "table" and type(Auto_Parry.Get_Balls) == "function" then
+        pcall(function() activeBalls = Auto_Parry.Get_Balls() end)
+    else
+        local mainFolder = workspace:FindFirstChild("Balls") or workspace:FindFirstChild("TrainingBalls")
+        if mainFolder then
+            for _, b in ipairs(mainFolder:GetChildren()) do
+                if b:IsA("BasePart") and (b:GetAttribute("realBall") or b:GetAttribute("target")) then
+                    table.insert(activeBalls, b)
+                end
+            end
+        end
+    end
+
+    local currentClock = os.clock()
+    
+    -- 3. เริ่มคำนวณลูกบอลทีละลูกในเฟรมปัจจุบัน
+    for _, ball in ipairs(activeBalls) do
+        local zoomies = ball:FindFirstChild("zoomies")
+        if not zoomies then continue end
+
+        local ballVelocity = zoomies.VectorVelocity
+        local ballSpeed = ballVelocity.Magnitude
+        if ballSpeed <= 0 then continue end
+
+        -- ตรวจสอบเป้าหมายของลูกบอล
+        local targetAttribute = tostring(ball:GetAttribute("target") or ball:GetAttribute("Target") or "")
+        local isTargetingMe = (targetAttribute == game.Players.LocalPlayer.Name or targetAttribute == Son.Name)
+
+        -- 4. [WasTargetingMeLastFrame & BallFirstTargetDistanceMap]
+        if isTargetingMe and not WasTargetingMeLastFrame[ball] then
+            -- เฟรมแรกที่บอลล็อคเป้าหมายมาหาเรา บันทึกระยะทางเริ่มต้นไว้ใช้งาน
+            local initialDistance = (Son.HumanoidRootPart.Position - ball.Position).Magnitude
+            BallFirstTargetDistanceMap[ball] = initialDistance
+        elseif not isTargetingMe then
+            -- บอลหันไปหาคนอื่นแล้ว เคลียร์ประวัติการตรวจจับทิ้งทั้งหมด
+            WasTargetingMeLastFrame[ball] = false
+            BallFirstTargetDistanceMap[ball] = nil
+            parryLocked[ball] = false
+            continue
+        end
+        WasTargetingMeLastFrame[ball] = isTargetingMe
+
+        -- 5. [parryLocked & lockTime] ระบบป้องกันสับไม้ลมและตีเบิ้ลคลิกในเฟรมเดียวกัน
+        if parryLocked[ball] then
+            if activeParryTasks[ball] == "CLEAR_AND_WAIT" then
+                parryLocked[ball] = false
+                lockTime[ball] = 0
+                activeParryTasks[ball] = nil
+                continue
+            end
+
+            currentCooldown = 0.7
+            if currentClock - lockTime[ball] >= currentCooldown then
+                parryLocked[ball] = false
+                lockTime[ball] = 0
+            else
+                continue
+            end
+        end
+
+
+        -- 6. ประมวลผลทางฟิสิกส์ (ระยะทาง และ เวลาที่บอลจะพุ่งชน Son)
+        local myHrpPosition = Son.HumanoidRootPart.Position
+        local ballPosition = ball.Position
+        local distance = (myHrpPosition - ballPosition).Magnitude
+        
+        -- เวลาสุทธิที่บอลใช้เดินทางมาถึงตัวเรา (วินาที)
+        local timeToReach = distance / ballSpeed
+
+        -- 7. ดึงค่าความหน่วงจากเซิร์ฟเวอร์แท้จริง (Ping)
+        local currentPing = 0.03
+        pcall(function()
+            if StatsService and StatsService:FindFirstChild("Network") then
+                local serverStats = StatsService.Network:FindFirstChild("ServerStatsItem")
+                local dataPing = serverStats and serverStats:FindFirstChild("Data Ping")
+                if dataPing then
+                    currentPing = math.clamp((dataPing:GetValue() or 30) / 1000, 0.01, 0.3)
+                end
+            end
+        end)
+
+        -- 8. [🎯 INTEGRATED ACCURACY & DISTANCE TIMING PIPELINE]
+        -- ดึงค่าดั้งเดิมจาก Slider GUI (Accuracy และ DistanceTiming) มาคำนวณหาตัวหารความเร็ว
+        local guiAccuracy = tonumber(Config.Accuracy) or 100
+        local guiDistanceTiming = tonumber(Config.DistanceTiming) or 100
+        
+        if Config.AutoAccuracy then
+            if ballSpeed >= 250 then
+                guiAccuracy = math.clamp(guiAccuracy + 35, 10, 150)
+            elseif ballSpeed >= 130 then
+                guiAccuracy = math.clamp(guiAccuracy + 15, 10, 150)
+            end
+        end
+        
+        -- สูตรแปลงค่า Accuracy เปอร์เซ็นต์ให้กลายเป็นตัวคูณความกว้างของขอบเขต Studs ปลอดภัย
+        local accuracyMultiplier = guiAccuracy / 100
+        local distanceTimingFactor = guiDistanceTiming / 100
+
+        -- คำนวณหาระยะทางสะสมที่ปลอดภัย (Safe Distance Threshold)
+        local speedDiff = math.min(math.max(ballSpeed - 9.5, 0), 650)
+        
+        -- ใช้ตัวหารมาตรฐานฟิสิกส์ Eryndor โดยผันแปรตามความแม่นยำ (guiAccuracy)
+        local speedDivisor = (2.4 + speedDiff * 0.002) / accuracyMultiplier
+        
+        -- หาระยะ Studs พื้นฐานที่บอบควรทำงาน (บวกผลลัพธ์จาก Ping และระยะทางเริ่มต้นของ BallFirstTargetDistanceMap)
+        local baseThresholdDistance = (currentPing * ballSpeed) + math.max(ballSpeed / speedDivisor, 9.5)
+        
+        -- นำระยะทางจุดแรกที่บอลเล็ง (BallFirstTargetDistanceMap) มาประมวลผลร่วมกับ DistanceTiming
+        if BallFirstTargetDistanceMap[ball] then
+            local firstDistance = BallFirstTargetDistanceMap[ball]
+            -- ถ้าบอลอยู่ไกล ตัวคูณจะช่วยหน่วงเวลาเพิ่มความเสถียร หากประชิดจะกดทันที
+            baseThresholdDistance = baseThresholdDistance + (math.min(firstDistance, 150) * 0.05 * distanceTimingFactor)
+        end
+        
+        if type(Auto_Parry.Is_Curved) == "function" then
+            if Auto_Parry.Is_Curved(ball) then
+                continue
+            end
+        end
+        
+        if ballVelocity.Y > 5 and distance > 25 then
+            if ballPosition.Y > myHrpPosition.Y then
+                continue
+            end
+        end
+
+        local activationTimeThreshold = baseThresholdDistance / ballSpeed
+        local finalActivationTime = activationTimeThreshold + 0.08
+        
+        if Config.AutoCooldownParry then
+            if ballSpeed >= 500 then
+                Config.ParryCooldownValue = 0.1
+            elseif ballSpeed >= 200 then
+                Config.ParryCooldownValue = 0.12
+            else
+                Config.ParryCooldownValue = 0.15
+            end
+        end
+        -- 10. ตรวจสอบเงื่อนไขเวลาเมื่อบอลพุ่งเข้าสู่ระยะโจมตี
+        if timeToReach <= finalActivationTime then
+            -- สั่งล็อกข้อมูลลูกบอลเฟรมนี้ทันที
+            parryLocked[ball] = true
+            lockTime[ball] = currentClock
+            
+            -- ส่งข้อมูลเน็ตเวิร์กยิง Parry เครือข่ายหลอกเซิร์ฟเวอร์
+            if type(Auto_Parry) == "table" and type(Auto_Parry.FireParryRemote) == "function" then
+                task.spawn(function()
+                    Auto_Parry.FireParryRemote(false)
+                end)
+            else
+                if type(fireParryInput) == "function" then
+                    fireParryInput()
+                end
+            end
+        end
+    end
+end)
+
+
+if shared._InvisParrySuccessConn then 
+    shared._InvisParrySuccessConn:Disconnect() 
+end
+
+activeParryTasks = activeParryTasks or {}
+
+shared._InvisParrySuccessConn = game:GetService("ReplicatedStorage").Remotes.ParrySuccessAll.OnClientEvent:Connect(function(_, ballPart, swordName, playerName)
+    xpcall(function()
+        if tostring(playerName) == game.Players.LocalPlayer.Name then
+            character = game.Players.LocalPlayer.Character
+            if character and character:GetAttribute("IS_EVENT_SINGULARITY") == true then
+                if type(parryLocked) == "table" then table.clear(parryLocked) end
+                if type(lockTime) == "table" then table.clear(lockTime) end
+                return
+            end
+            
+            if ballPart then
+                if activeParryTasks[ballPart] then
+                    task.cancel(activeParryTasks[ballPart])
+                    activeParryTasks[ballPart] = "CLEAR_AND_WAIT"
+                else
+                    activeParryTasks[ballPart] = false
+                end
+                
+                finalCooldown = tonumber(Config.ParryCooldownValue) or 0.10
+                if activeParryTasks[ballPart] == false then
+                    activeParryTasks[ballPart] = task.delay(finalCooldown, function()
+                        if type(parryLocked) == "table" then parryLocked[ballPart] = false end
+                        if type(lockTime) == "table" then lockTime[ballPart] = 0 end
+                        if type(shared.InvisClearLock) == "function" then 
+                            pcall(shared.InvisClearLock, ballPart) 
+                        end
+                        activeParryTasks[ballPart] = nil
+                    end)
+                end
+            end
+        end
+    end, function(err)
+        print("ParrySuccessAll connection handler failed: " .. tostring(err))
+    end)
+end)
+
+--// GUI Parent
+local Parent
+
+pcall(function()
+    if gethui then
+        Parent = gethui()
+    end
+end)
+
+Parent = Parent or LocalPlayer:WaitForChild("PlayerGui")
+
+--// Remove old GUI
+local Old = Parent:FindFirstChild("ModernGrayLibrary")
+if Old then
+    Old:Destroy()
+end
+
+--==============================================================
+-- COLORS
+--==============================================================
+
+local Colors = {
+    Background = Color3.fromRGB(18, 18, 21),
+    Sidebar = Color3.fromRGB(24, 24, 28),
+    Card = Color3.fromRGB(29, 29, 34),
+    CardHover = Color3.fromRGB(36, 36, 42),
+
+    Stroke = Color3.fromRGB(55, 55, 62),
+
+    Text = Color3.fromRGB(240, 240, 245),
+    SubText = Color3.fromRGB(145, 145, 155),
+
+    Accent = Color3.fromRGB(130, 130, 140),
+    AccentBright = Color3.fromRGB(175, 175, 185),
+
+    Green = Color3.fromRGB(70, 210, 130),
+    Red = Color3.fromRGB(230, 75, 85),
+
+    White = Color3.fromRGB(255, 255, 255),
+}
+
+--==============================================================
+-- UTILITIES
+--==============================================================
+
+local function Tween(obj, time, props)
+    local tween = TweenService:Create(
+        obj,
+        TweenInfo.new(time, Enum.EasingStyle.Quart, Enum.EasingDirection.Out),
+        props
+    )
+
+    tween:Play()
+    return tween
+end
+
+local function Corner(obj, radius)
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, radius or 8)
+    c.Parent = obj
+    return c
+end
+
+local function Stroke(obj, color, thickness)
+    local s = Instance.new("UIStroke")
+    s.Color = color or Colors.Stroke
+    s.Thickness = thickness or 1
+    s.Transparency = 0.25
+    s.Parent = obj
+    return s
+end
+
+local function Padding(obj, amount)
+    local p = Instance.new("UIPadding")
+    p.PaddingTop = UDim.new(0, amount)
+    p.PaddingBottom = UDim.new(0, amount)
+    p.PaddingLeft = UDim.new(0, amount)
+    p.PaddingRight = UDim.new(0, amount)
+    p.Parent = obj
+    return p
+end
+
+local function CreateText(parent, text, size, color)
+    local label = Instance.new("TextLabel")
+
+    label.BackgroundTransparency = 1
+    label.Text = text or ""
+    label.TextColor3 = color or Colors.Text
+    label.TextSize = size or 14
+    label.Font = Enum.Font.GothamMedium
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.Parent = parent
+
+    return label
+end
+
+--==============================================================
+-- LIBRARY
+--==============================================================
+
+local Library = {}
+Library.Tabs = {}
+Library.CurrentTab = nil
+
+--==============================================================
+-- MAIN GUI
+--==============================================================
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "ModernGrayLibrary"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.IgnoreGuiInset = true
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.Parent = Parent
+
+pcall(function()
+    Main = Instance.new("ImageLabel")
+    Main.Name = "Main"
+    Main.Size = UDim2.fromOffset(550, 350)
+    Main.Position = UDim2.fromScale(0.5, 0.5)
+    Main.AnchorPoint = Vector2.new(0.5, 0.5)
+    Main.BackgroundColor3 = Colors.Background
+    Main.ClipsDescendants = true
+    Main.ScaleType = Enum.ScaleType.Crop
+    Main.Parent = ScreenGui
+
+    task.spawn(function()
+        local TargetUrl = "https://raw.githubusercontent.com/foreverspacexc-blip/Test/refs/heads/main/9a5fdb2746fc8affb0900f9e5405104e.jpg"
+        
+        -- ใช้ฟังก์ชันสำหรับดึงไฟล์ภาพดิบและแปลงเป็น Content ID บน Executor
+        if writefile and getcustomasset then
+            local Success, Data = pcall(function()
+                return game:HttpGet(TargetUrl)
+            end)
+            
+            if Success and Data then
+                writefile("MainBackground.jpg", Data)
+                Main.Image = getcustomasset("MainBackground.jpg")
+            else
+                print("Error: Failed to download background image from GitHub")
+            end
+        else
+            print("Error: Your executor does not support getcustomasset or writefile")
+        end
+    end)
+end)
+if not Main then
+    print("Error: Failed to create Main ImageLabel window")
+end
+
+Corner(Main, 12)
+Stroke(Main)
+
+pcall(function()
+    ImageDisplay = Instance.new("ImageLabel")
+    ImageDisplay.Name = "UrlImageDisplay"
+    ImageDisplay.Size = UDim2.fromOffset(200, 200)
+    ImageDisplay.Position = UDim2.new(0.5, -100, 0.5, -100)
+    ImageDisplay.BackgroundTransparency = 1
+    ImageDisplay.Parent = MainTab.Page
+
+    ImageCorner = Instance.new("UICorner")
+    ImageCorner.CornerRadius = UDim.new(0, 12)
+    ImageCorner.Parent = ImageDisplay
+
+    task.spawn(function()
+        local TargetUrl = "https://raw.githubusercontent.com/foreverspacexc-blip/Test/refs/heads/main/02bfdff4b7c9e2f0c5077dec65136ac5.jpg"
+        local HttpService = game:GetService("HttpService")
+        local EditableImage = Instance.new("EditableImage")
+        EditableImage.Parent = ImageDisplay
+
+        local Success, Response = pcall(function()
+            return HttpService:GetAsync("https://roblox.com" .. HttpService:UrlEncode(TargetUrl))
+        end)
+        
+        if Success and Response then
+            print("Successfully rendered external GitHub image")
+        else
+            print("Error: Live link render failed from server response")
+        end
+    end)
+end)
+if not ImageDisplay then
+    print("Error: Failed to register custom URL image module")
+end
+
+pcall(function()
+    ToggleButton = Instance.new("ImageButton")
+    ToggleButton.Name = "FloatToggleButton"
+    ToggleButton.Size = UDim2.fromOffset(45, 45)
+    ToggleButton.Position = UDim2.new(0.05, 0, 0.2, 0)
+    ToggleButton.BackgroundColor3 = Colors.Card
+    ToggleButton.ScaleType = Enum.ScaleType.Crop
+    ToggleButton.Parent = ScreenGui
+
+    ToggleCorner = Instance.new("UICorner")
+    ToggleCorner.CornerRadius = UDim.new(0, 10)
+    ToggleCorner.Parent = ToggleButton
+
+    ToggleStroke = Instance.new("UIStroke")
+    ToggleStroke.Color = Colors.Stroke
+    ToggleStroke.Thickness = 1
+    ToggleStroke.Transparency = 0.25
+    ToggleStroke.Parent = ToggleButton
+
+    task.spawn(function()
+        local TargetUrl = "https://raw.githubusercontent.com/foreverspacexc-blip/Test/refs/heads/main/02bfdff4b7c9e2f0c5077dec65136ac5.jpg"
+        if writefile and getcustomasset then
+            local Success, Data = pcall(function()
+                return game:HttpGet(TargetUrl)
+            end)
+            if Success and Data then
+                writefile("ToggleButtonAsset.jpg", Data)
+                ToggleButton.Image = getcustomasset("ToggleButtonAsset.jpg")
+            else
+                print("Error: Failed to fetch image asset for toggle button")
+            end
+        end
+    end)
+
+    ToggleButton.MouseButton1Click:Connect(function()
+        Main.Visible = not Main.Visible
+    end)
+end)
+if not ToggleButton then
+    print("Error: Failed to clear and draw float toggle button interface")
+end
+
+--==============================================================
+-- TOP BAR
+--==============================================================
+
+TopBar = Instance.new("Frame")
+TopBar.Name = "TopBar"
+TopBar.Size = UDim2.new(1, 0, 0, 58)
+TopBar.BackgroundColor3 = Colors.Sidebar
+TopBar.BorderSizePixel = 0
+TopBar.Parent = Main
+
+pcall(function()
+    TopBarCorner = Instance.new("UICorner")
+    TopBarCorner.CornerRadius = UDim.new(0, 12)
+    TopBarCorner.Parent = TopBar
+end)
+if not TopBarCorner then
+    print("Error: Failed to apply top bar round corners clipping")
+end
+
+local Title = CreateText(
+    TopBar,
+    "INVIS HUB",
+    18,
+    Colors.Text
+)
+
+Title.Position = UDim2.fromOffset(20, 0)
+Title.Size = UDim2.fromOffset(130, 58)
+Title.Font = Enum.Font.GothamBold
+
+local Subtitle = CreateText(
+    TopBar,
+    "Modern Interface",
+    11,
+    Colors.SubText
+)
+
+Subtitle.Position = UDim2.fromOffset(20, 31)
+Subtitle.Size = UDim2.fromOffset(130, 18)
+
+--==============================================================
+-- HORIZONTAL TAB BAR
+--==============================================================
+
+local TabScroll = Instance.new("ScrollingFrame")
+TabScroll.Name = "Tabs"
+TabScroll.Position = UDim2.fromOffset(155, 9)
+TabScroll.Size = UDim2.new(1, -165, 0, 40)
+TabScroll.BackgroundTransparency = 1
+TabScroll.BorderSizePixel = 0
+TabScroll.ScrollBarThickness = 0
+TabScroll.ScrollingDirection = Enum.ScrollingDirection.X
+TabScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+TabScroll.AutomaticCanvasSize = Enum.AutomaticSize.X
+TabScroll.Parent = TopBar
+
+local TabLayout = Instance.new("UIListLayout")
+TabLayout.FillDirection = Enum.FillDirection.Horizontal
+TabLayout.HorizontalAlignment = Enum.HorizontalAlignment.Left
+TabLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+TabLayout.Padding = UDim.new(0, 7)
+TabLayout.Parent = TabScroll
+
+--==============================================================
+-- CONTENT
+--==============================================================
+
+local Content = Instance.new("Frame")
+Content.Name = "Content"
+Content.Position = UDim2.fromOffset(0, 58)
+Content.Size = UDim2.new(1, 0, 1, -58)
+Content.BackgroundTransparency = 1
+Content.Parent = Main
+
+--==============================================================
+-- DRAG SYSTEM
+--==============================================================
+
+do
+    local dragging = false
+    local dragStart
+    local startPosition
+
+    TopBar.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+
+            dragging = true
+            dragStart = input.Position
+            startPosition = Main.Position
+
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    dragging = false
+                end
+            end)
+        end
+    end)
+
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging then
+            local delta = input.Position - dragStart
+
+            Main.Position = UDim2.new(
+                startPosition.X.Scale,
+                startPosition.X.Offset + delta.X,
+                startPosition.Y.Scale,
+                startPosition.Y.Offset + delta.Y
+            )
+        end
+    end)
+end
+
+--==============================================================
+-- TAB SYSTEM
+--==============================================================
+
+function Library:CreateTab(name)
+    local Tab = {}
+
+    -- Tab button
+    local Button = Instance.new("TextButton")
+    Button.Name = name .. "_Tab"
+    Button.Size = UDim2.fromOffset(100, 38)
+    Button.BackgroundColor3 = Colors.Card
+    Button.Text = name
+    Button.TextColor3 = Colors.SubText
+    Button.TextSize = 12
+    Button.Font = Enum.Font.GothamSemibold
+    Button.AutoButtonColor = false
+    Button.Parent = TabScroll
+
+    Corner(Button, 8)
+
+    -- Page
+    local Page = Instance.new("ScrollingFrame")
+    Page.Name = name .. "_Page"
+    Page.Size = UDim2.new(1, -24, 1, -24)
+    Page.Position = UDim2.fromOffset(12, 12)
+    Page.BackgroundTransparency = 1
+    Page.BorderSizePixel = 0
+    Page.ScrollBarThickness = 3
+    Page.ScrollBarImageColor3 = Colors.Accent
+    Page.CanvasSize = UDim2.new(0, 0, 0, 0)
+    Page.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    Page.Visible = false
+    Page.Parent = Content
+
+    local Layout = Instance.new("UIListLayout")
+    Layout.Padding = UDim.new(0, 8)
+    Layout.SortOrder = Enum.SortOrder.LayoutOrder
+    Layout.Parent = Page
+
+    local PagePadding = Instance.new("UIPadding")
+    PagePadding.PaddingBottom = UDim.new(0, 12)
+    PagePadding.Parent = Page
+
+    -- Select tab
+    Button.MouseButton1Click:Connect(function()
+
+        for _, data in pairs(Library.Tabs) do
+            data.Page.Visible = false
+
+            Tween(
+                data.Button,
+                0.18,
+                {
+                    BackgroundColor3 = Colors.Card,
+                    TextColor3 = Colors.SubText
+                }
+            )
+        end
+
+        Page.Visible = true
+
+        Tween(
+            Button,
+            0.18,
+            {
+                BackgroundColor3 = Colors.Accent,
+                TextColor3 = Colors.White
+            }
+        )
+
+        Library.CurrentTab = Tab
+    end)
+
+    table.insert(Library.Tabs, {
+        Button = Button,
+        Page = Page
+    })
+
+    --==========================================================
+    -- TOGGLE
+    --==========================================================
+
+    function Tab:CreateToggle(text, default, callback)
+
+        local value = default or false
+
+        local Holder = Instance.new("Frame")
+        Holder.Size = UDim2.new(1, 0, 0, 52)
+        Holder.BackgroundColor3 = Colors.Card
+        Holder.Parent = Page
+
+        Corner(Holder, 8)
+
+        local Label = CreateText(
+            Holder,
+            text,
+            13,
+            Colors.Text
+        )
+
+        Label.Position = UDim2.fromOffset(15, 0)
+        Label.Size = UDim2.new(1, -80, 1, 0)
+
+        local Toggle = Instance.new("TextButton")
+        Toggle.Size = UDim2.fromOffset(46, 24)
+        Toggle.Position = UDim2.new(1, -60, 0.5, -12)
+        Toggle.BackgroundColor3 = Colors.Red
+        Toggle.Text = ""
+        Toggle.AutoButtonColor = false
+        Toggle.Parent = Holder
+
+        Corner(Toggle, 20)
+
+        local Circle = Instance.new("Frame")
+        Circle.Size = UDim2.fromOffset(18, 18)
+        Circle.Position = UDim2.fromOffset(3, 3)
+        Circle.BackgroundColor3 = Colors.White
+        Circle.Parent = Toggle
+
+        Corner(Circle, 20)
+
+        local function Update()
+
+            if value then
+                Tween(Toggle, 0.18, {
+                    BackgroundColor3 = Colors.Green
+                })
+
+                Tween(Circle, 0.18, {
+                    Position = UDim2.new(1, -21, 0, 3)
+                })
+            else
+                Tween(Toggle, 0.18, {
+                    BackgroundColor3 = Colors.Red
+                })
+
+                Tween(Circle, 0.18, {
+                    Position = UDim2.fromOffset(3, 3)
+                })
+            end
+
+            if callback then
+                callback(value)
+            end
+        end
+
+        Toggle.MouseButton1Click:Connect(function()
+            value = not value
+            Update()
+        end)
+
+        Update()
+
+        return {
+            Set = function(_, newValue)
+                value = newValue
+                Update()
+            end,
+
+            Get = function()
+                return value
+            end
+        }
+    end
+
+    --==========================================================
+    -- BUTTON
+    --==========================================================
+
+    function Tab:CreateButton(text, callback)
+
+        local Button = Instance.new("TextButton")
+
+        Button.Size = UDim2.new(1, 0, 0, 45)
+        Button.BackgroundColor3 = Colors.Card
+        Button.Text = text
+        Button.TextColor3 = Colors.Text
+        Button.TextSize = 13
+        Button.Font = Enum.Font.GothamSemibold
+        Button.AutoButtonColor = false
+        Button.Parent = Page
+
+        Corner(Button, 8)
+        Stroke(Button)
+
+        Button.MouseEnter:Connect(function()
+            Tween(Button, 0.15, {
+                BackgroundColor3 = Colors.CardHover
+            })
+        end)
+
+        Button.MouseLeave:Connect(function()
+            Tween(Button, 0.15, {
+                BackgroundColor3 = Colors.Card
+            })
+        end)
+
+        Button.MouseButton1Click:Connect(function()
+            Tween(Button, 0.08, {
+                Size = UDim2.new(1, -4, 0, 43)
+            })
+
+            task.delay(0.08, function()
+                Tween(Button, 0.12, {
+                    Size = UDim2.new(1, 0, 0, 45)
+                })
+            end)
+
+            if callback then
+                callback()
+            end
+        end)
+
+        return Button
+    end
+
+    --==========================================================
+    -- SELECT
+    --==========================================================
+
+    function Tab:CreateSelect(text, options, callback)
+
+        local Holder = Instance.new("Frame")
+        Holder.Size = UDim2.new(1, 0, 0, 52)
+        Holder.BackgroundColor3 = Colors.Card
+        Holder.ClipsDescendants = false
+        Holder.ZIndex = 10
+        Holder.Parent = Page
+
+        Corner(Holder, 8)
+
+        local Label = CreateText(
+            Holder,
+            text,
+            13,
+            Colors.Text
+        )
+
+        Label.Position = UDim2.fromOffset(15, 0)
+        Label.Size = UDim2.new(0.4, 0, 1, 0)
+
+        local SelectButton = Instance.new("TextButton")
+        SelectButton.Size = UDim2.fromOffset(170, 34)
+        SelectButton.Position = UDim2.new(1, -185, 0.5, -17)
+        SelectButton.BackgroundColor3 = Colors.Sidebar
+        SelectButton.Text = tostring(options[1] or "Select")
+        SelectButton.TextColor3 = Colors.Text
+        SelectButton.TextSize = 12
+        SelectButton.Font = Enum.Font.GothamMedium
+        SelectButton.AutoButtonColor = false
+        SelectButton.ZIndex = 11
+        SelectButton.Parent = Holder
+
+        Corner(SelectButton, 7)
+
+        local Arrow = CreateText(
+            SelectButton,
+            "▼",
+            10,
+            Colors.SubText
+        )
+
+        Arrow.Size = UDim2.fromOffset(25, 34)
+        Arrow.Position = UDim2.new(1, -28, 0, 0)
+        Arrow.TextXAlignment = Enum.TextXAlignment.Center
+        Arrow.ZIndex = 12
+
+        -- Dropdown ScrollingFrame
+        local Dropdown = Instance.new("ScrollingFrame")
+        Dropdown.Size = UDim2.fromOffset(170, 0)
+        Dropdown.Position = UDim2.new(1, -185, 1, 5)
+        Dropdown.BackgroundColor3 = Colors.Sidebar
+        Dropdown.BorderSizePixel = 0
+        Dropdown.ScrollBarThickness = 3
+        Dropdown.ScrollBarImageColor3 = Colors.Accent
+        Dropdown.AutomaticCanvasSize = Enum.AutomaticSize.Y
+        Dropdown.CanvasSize = UDim2.new(0, 0, 0, 0)
+        Dropdown.Visible = false
+        Dropdown.ZIndex = 50
+        Dropdown.Parent = Holder
+
+        Corner(Dropdown, 7)
+        Stroke(Dropdown)
+
+        local DropLayout = Instance.new("UIListLayout")
+        DropLayout.Padding = UDim.new(0, 3)
+        DropLayout.Parent = Dropdown
+
+        Padding(Dropdown, 5)
+
+        local selected = options[1]
+
+        for _, option in ipairs(options) do
+
+            local OptionButton = Instance.new("TextButton")
+
+            OptionButton.Size = UDim2.new(1, 0, 0, 34)
+            OptionButton.BackgroundColor3 = Colors.Card
+            OptionButton.Text = tostring(option)
+            OptionButton.TextColor3 = Colors.Text
+            OptionButton.TextSize = 12
+            OptionButton.Font = Enum.Font.GothamMedium
+            OptionButton.AutoButtonColor = false
+            OptionButton.ZIndex = 51
+            OptionButton.Parent = Dropdown
+
+            Corner(OptionButton, 6)
+
+            OptionButton.MouseEnter:Connect(function()
+                Tween(OptionButton, 0.12, {
+                    BackgroundColor3 = Colors.CardHover
+                })
+            end)
+
+            OptionButton.MouseLeave:Connect(function()
+                Tween(OptionButton, 0.12, {
+                    BackgroundColor3 = Colors.Card
+                })
+            end)
+
+            OptionButton.MouseButton1Click:Connect(function()
+
+                selected = option
+                SelectButton.Text = tostring(option)
+
+                Dropdown.Visible = false
+
+                Tween(
+                    Dropdown,
+                    0.15,
+                    {
+                        Size = UDim2.fromOffset(170, 0)
+                    }
+                )
+
+                Arrow.Text = "▼"
+
+                if callback then
+                    callback(option)
+                end
+            end)
+        end
+
+        SelectButton.MouseButton1Click:Connect(function()
+
+            if Dropdown.Visible then
+
+                Arrow.Text = "▼"
+
+                Tween(
+                    Dropdown,
+                    0.15,
+                    {
+                        Size = UDim2.fromOffset(170, 0)
+                    }
+                )
+
+                task.delay(0.15, function()
+                    Dropdown.Visible = false
+                end)
+
+            else
+
+                Dropdown.Visible = true
+                Arrow.Text = "▲"
+
+                local height = math.min(
+                    #options * 37 + 10,
+                    180
+                )
+
+                Tween(
+                    Dropdown,
+                    0.18,
+                    {
+                        Size = UDim2.fromOffset(170, height)
+                    }
+                )
+            end
+        end)
+
+        return {
+            Set = function(_, value)
+                selected = value
+                SelectButton.Text = tostring(value)
+            end,
+
+            Get = function()
+                return selected
+            end
+        }
+    end
+
+    --==========================================================
+    -- SLIDER
+    --==========================================================
+
+    function Tab:CreateSlider(text, min, max, default, callback)
+
+        min = min or 0
+        max = max or 100
+        default = default or min
+
+        local value = default
+
+        local Holder = Instance.new("Frame")
+        Holder.Size = UDim2.new(1, 0, 0, 70)
+        Holder.BackgroundColor3 = Colors.Card
+        Holder.Parent = Page
+
+        Corner(Holder, 8)
+
+        local Label = CreateText(
+            Holder,
+            text,
+            13,
+            Colors.Text
+        )
+
+        Label.Position = UDim2.fromOffset(15, 8)
+        Label.Size = UDim2.new(1, -100, 0, 22)
+
+        local ValueLabel = CreateText(
+            Holder,
+            tostring(value),
+            12,
+            Colors.SubText
+        )
+
+        ValueLabel.Position = UDim2.new(1, -65, 0, 8)
+        ValueLabel.Size = UDim2.fromOffset(50, 22)
+        ValueLabel.TextXAlignment = Enum.TextXAlignment.Right
+
+        local Bar = Instance.new("Frame")
+        Bar.Size = UDim2.new(1, -30, 0, 6)
+        Bar.Position = UDim2.fromOffset(15, 46)
+        Bar.BackgroundColor3 = Colors.Sidebar
+        Bar.Parent = Holder
+
+        Corner(Bar, 5)
+
+        local Fill = Instance.new("Frame")
+        Fill.BackgroundColor3 = Colors.AccentBright
+        Fill.Size = UDim2.new(
+            (value - min) / (max - min),
+            0,
+            1,
+            0
+        )
+        Fill.Parent = Bar
+
+        Corner(Fill, 5)
+
+        local Knob = Instance.new("Frame")
+        Knob.Size = UDim2.fromOffset(14, 14)
+        Knob.AnchorPoint = Vector2.new(0.5, 0.5)
+        Knob.Position = UDim2.new(
+            (value - min) / (max - min),
+            0,
+            0.5,
+            0
+        )
+        Knob.BackgroundColor3 = Colors.White
+        Knob.Parent = Bar
+
+        Corner(Knob, 20)
+
+        local dragging = false
+
+        local function Update(inputX)
+
+            local percentage = math.clamp(
+                (inputX - Bar.AbsolutePosition.X)
+                / Bar.AbsoluteSize.X,
+                0,
+                1
+            )
+
+            value = math.floor(
+                min + (max - min) * percentage
+            )
+
+            Fill.Size = UDim2.new(
+                percentage,
+                0,
+                1,
+                0
+            )
+
+            Knob.Position = UDim2.new(
+                percentage,
+                0,
+                0.5,
+                0
+            )
+
+            ValueLabel.Text = tostring(value)
+
+            if callback then
+                callback(value)
+            end
+        end
+
+        Bar.InputBegan:Connect(function(input)
+
+            if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+
+                dragging = true
+                Update(input.Position.X)
+            end
+        end)
+
+        UserInputService.InputChanged:Connect(function(input)
+
+            if dragging and (
+                input.UserInputType == Enum.UserInputType.MouseMovement
+                or input.UserInputType == Enum.UserInputType.Touch
+            ) then
+
+                Update(input.Position.X)
+            end
+        end)
+
+        UserInputService.InputEnded:Connect(function(input)
+
+            if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+
+                dragging = false
+            end
+        end)
+
+        return {
+            Set = function(_, newValue)
+
+                value = math.clamp(newValue, min, max)
+
+                local percentage =
+                    (value - min) / (max - min)
+
+                Fill.Size = UDim2.new(
+                    percentage,
+                    0,
+                    1,
+                    0
+                )
+
+                Knob.Position = UDim2.new(
+                    percentage,
+                    0,
+                    0.5,
+                    0
+                )
+
+                ValueLabel.Text = tostring(value)
+
+                if callback then
+                    callback(value)
+                end
+            end,
+
+            Get = function()
+                return value
+            end
+        }
+    end
+
+    --==========================================================
+    -- TEXTBOX
+    --==========================================================
+
+    function Tab:CreateTextbox(text, placeholder, callback)
+
+        local Holder = Instance.new("Frame")
+        Holder.Size = UDim2.new(1, 0, 0, 58)
+        Holder.BackgroundColor3 = Colors.Card
+        Holder.Parent = Page
+
+        Corner(Holder, 8)
+
+        local Label = CreateText(
+            Holder,
+            text,
+            12,
+            Colors.SubText
+        )
+
+        Label.Position = UDim2.fromOffset(15, 0)
+        Label.Size = UDim2.fromOffset(150, 58)
+
+        local Box = Instance.new("TextBox")
+        Box.Size = UDim2.new(1, -180, 0, 36)
+        Box.Position = UDim2.new(1, -195, 0.5, -18)
+        Box.BackgroundColor3 = Colors.Sidebar
+        Box.TextColor3 = Colors.Text
+        Box.PlaceholderColor3 = Colors.SubText
+        Box.PlaceholderText = placeholder or ""
+        Box.Text = ""
+        Box.TextSize = 12
+        Box.Font = Enum.Font.Gotham
+        Box.ClearTextOnFocus = false
+        Box.Parent = Holder
+
+        Corner(Box, 7)
+
+        Padding(Box, 8)
+
+        Box.FocusLost:Connect(function(enterPressed)
+
+            if callback then
+                callback(Box.Text, enterPressed)
+            end
+        end)
+
+        return Box
+    end
+
+    return Tab
+end
+
+--==============================================================
+-- NOTICE SYSTEM
+--==============================================================
+
+function Library:CreateNotice(config)
+
+    config = config or {}
+
+    local TitleText = config.Title or "Notice"
+    local Message = config.Text or ""
+    local Type = config.Type or "OK"
+    local Seconds = config.Seconds or 3
+    local Callback = config.Callback
+
+    -- Overlay
+    local Overlay = Instance.new("Frame")
+    Overlay.Size = UDim2.fromScale(1, 1)
+    Overlay.BackgroundColor3 = Color3.new(0, 0, 0)
+    Overlay.BackgroundTransparency = 0.4
+    Overlay.ZIndex = 100
+    Overlay.Parent = ScreenGui
+
+    local Notice = Instance.new("Frame")
+    Notice.Size = UDim2.fromOffset(360, 210)
+    Notice.Position = UDim2.fromScale(0.5, 0.5)
+    Notice.AnchorPoint = Vector2.new(0.5, 0.5)
+    Notice.BackgroundColor3 = Colors.Background
+    Notice.ZIndex = 101
+    Notice.Parent = Overlay
+
+    Corner(Notice, 12)
+    Stroke(Notice)
+
+    local TitleLabel = CreateText(
+        Notice,
+        TitleText,
+        17,
+        Colors.Text
+    )
+
+    TitleLabel.Position = UDim2.fromOffset(20, 15)
+    TitleLabel.Size = UDim2.new(1, -60, 0, 28)
+    TitleLabel.Font = Enum.Font.GothamBold
+    TitleLabel.ZIndex = 102
+
+    local MessageLabel = CreateText(
+        Notice,
+        Message,
+        12,
+        Colors.SubText
+    )
+
+    MessageLabel.Position = UDim2.fromOffset(20, 52)
+    MessageLabel.Size = UDim2.new(1, -40, 0, 50)
+    MessageLabel.TextWrapped = true
+    MessageLabel.ZIndex = 102
+
+    local function Close(result)
+
+        Tween(
+            Notice,
+            0.15,
+            {
+                Size = UDim2.fromOffset(330, 190)
+            }
+        )
+
+        Tween(
+            Overlay,
+            0.15,
+            {
+                BackgroundTransparency = 1
+            }
+        )
+
+        task.delay(0.16, function()
+
+            if Callback then
+                Callback(result)
+            end
+
+            Overlay:Destroy()
+        end)
+    end
+
+    --==========================================================
+    -- YES / NO
+    --==========================================================
+
+    if Type == "YesNo" then
+
+        local Yes = Instance.new("TextButton")
+        Yes.Size = UDim2.fromOffset(145, 40)
+        Yes.Position = UDim2.new(0, 20, 1, -60)
+        Yes.BackgroundColor3 = Colors.Green
+        Yes.Text = "YES"
+        Yes.TextColor3 = Colors.White
+        Yes.TextSize = 12
+        Yes.Font = Enum.Font.GothamBold
+        Yes.AutoButtonColor = false
+        Yes.ZIndex = 103
+        Yes.Parent = Notice
+
+        Corner(Yes, 7)
+
+        local No = Yes:Clone()
+        No.BackgroundColor3 = Colors.Red
+        No.Text = "NO"
+        No.Position = UDim2.new(1, -165, 1, -60)
+        No.Parent = Notice
+
+        Yes.MouseButton1Click:Connect(function()
+            Close(true)
+        end)
+
+        No.MouseButton1Click:Connect(function()
+            Close(false)
+        end)
+
+    --==========================================================
+    -- OK
+    --==========================================================
+
+    elseif Type == "OK" then
+
+        local OK = Instance.new("TextButton")
+
+        OK.Size = UDim2.fromOffset(145, 40)
+        OK.Position = UDim2.new(0.5, -72, 1, -60)
+        OK.BackgroundColor3 = Colors.Accent
+        OK.Text = "OK"
+        OK.TextColor3 = Colors.White
+        OK.TextSize = 12
+        OK.Font = Enum.Font.GothamBold
+        OK.AutoButtonColor = false
+        OK.ZIndex = 103
+        OK.Parent = Notice
+
+        Corner(OK, 7)
+
+        OK.MouseButton1Click:Connect(function()
+            Close(true)
+        end)
+
+    --==========================================================
+    -- WAIT
+    --==========================================================
+
+    elseif Type == "Wait" or Type == "WaitX" then
+
+        local TimeLabel = CreateText(
+            Notice,
+            tostring(Seconds) .. "s",
+            12,
+            Colors.SubText
+        )
+
+        TimeLabel.Position = UDim2.new(0, 20, 1, -52)
+        TimeLabel.Size = UDim2.new(1, -40, 0, 30)
+        TimeLabel.TextXAlignment = Enum.TextXAlignment.Center
+        TimeLabel.ZIndex = 103
+
+        if Type == "WaitX" then
+
+            local X = Instance.new("TextButton")
+
+            X.Size = UDim2.fromOffset(28, 28)
+            X.Position = UDim2.new(1, -38, 0, 12)
+            X.BackgroundTransparency = 1
+            X.Text = "×"
+            X.TextColor3 = Colors.SubText
+            X.TextSize = 22
+            X.Font = Enum.Font.GothamBold
+            X.ZIndex = 104
+            X.Parent = Notice
+
+            X.MouseButton1Click:Connect(function()
+                Close(false)
+            end)
+        end
+
+        task.spawn(function()
+
+            for i = Seconds, 1, -1 do
+
+                if not Notice.Parent then
+                    return
+                end
+
+                TimeLabel.Text = "Closing in " .. i .. "s"
+
+                task.wait(1)
+            end
+
+            if Notice.Parent then
+                Close(true)
+            end
+        end)
+
+    --==========================================================
+    -- TEXTBOX + OK
+    --==========================================================
+
+    elseif Type == "Textbox" then
+
+        local Box = Instance.new("TextBox")
+
+        Box.Size = UDim2.new(1, -40, 0, 40)
+        Box.Position = UDim2.fromOffset(20, 105)
+        Box.BackgroundColor3 = Colors.Sidebar
+        Box.TextColor3 = Colors.Text
+        Box.PlaceholderColor3 = Colors.SubText
+        Box.PlaceholderText = config.Placeholder or "Enter text..."
+        Box.Text = ""
+        Box.TextSize = 12
+        Box.Font = Enum.Font.Gotham
+        Box.ClearTextOnFocus = false
+        Box.ZIndex = 103
+        Box.Parent = Notice
+
+        Corner(Box, 7)
+        Padding(Box, 8)
+
+        local OK = Instance.new("TextButton")
+
+        OK.Size = UDim2.fromOffset(145, 38)
+        OK.Position = UDim2.new(0.5, -72, 1, -50)
+        OK.BackgroundColor3 = Colors.Accent
+        OK.Text = "OK"
+        OK.TextColor3 = Colors.White
+        OK.TextSize = 12
+        OK.Font = Enum.Font.GothamBold
+        OK.AutoButtonColor = false
+        OK.ZIndex = 103
+        OK.Parent = Notice
+
+        Corner(OK, 7)
+
+        OK.MouseButton1Click:Connect(function()
+            Close(Box.Text)
+        end)
+    end
+
+    return {
+        Close = function()
+            if Overlay.Parent then
+                Close(false)
+            end
+        end
+    }
+end
+
+--==============================================================
+-- EXAMPLE / DEMO
+--==============================================================
+
+local MainTab = Library:CreateTab("Main")
+local autotab = Library:CreateTab("Auto")
+local manualtab = Library:CreateTab("Manual")
+local visualtab = Library:CreateTab("Visual")
+local playertab = Library:CreateTab("Player")
+local balltab = Library:CreateTab("Ball")
+local boosttab = Library:CreateTab("Booster")
+local immortaltab = Library:CreateTab("Immortal")
+
+autotab:CreateToggle("Auto Parry", Config.AutoParry, function(value)
+    Config.AutoParry = value
+end)
+
+autotab:CreateSlider("Parry Accuracy", 10, 150, Config.Accuracy or 100, function(value)
+    Config.Accuracy = value
+end)
+
+autotab:CreateToggle("Auto Accuracy", Config.AutoAccuracy, function(value)
+    Config.AutoAccuracy = value
+end)
+
+autotab:CreateSlider("Parry Cooldown", 0.01 * 100, 1 * 100, (Config.ParryCooldownValue or 0.12) * 100, function(value)
+    Config.ParryCooldownValue = value / 100
+end)
+
+autotab:CreateToggle("Auto Cooldown Parry", Config.AutoCooldownParry, function(value)
+    Config.AutoCooldownParry = value
+end)
+
+if shared._InvisRemoteNoticeThread then task.cancel(shared._InvisRemoteNoticeThread) end
+
+shared._InvisRemoteNoticeThread = task.spawn(function()
+    hasNotifiedBypass = false
+    while true do
+        task.wait(0.5)
+        if _reverted and next(_reverted) ~= nil then
+            for _remote, _originalArgs in pairs(_reverted) do
+                if type(_originalArgs) == "table" and _originalArgs[1] ~= nil then
+                    if not hasNotifiedBypass then
+                        hasNotifiedBypass = true
+                        pcall(function()
+                            if type(Library) == "table" and type(Library.CreateNotice) == "function" then
+                                Library:CreateNotice({
+                                    Title = "System Notification",
+                                    Text = "Network Remote Connected & Token Injected! Auto Parry is now using Remote Method.",
+                                    Type = "OK"
+                                })
+                            else
+                                print("Invis Network: Network Remote Connected & Token Injected!")
+                            end
+                        end)
+                        break
+                    end
+                end
+            end
+        end
+        if hasNotifiedBypass then break end
+        if not shared._InvisRunning then break end
+    end
+end)
+
+--==============================================================
+-- RETURN LIBRARY
+--==============================================================
+
+return Library
