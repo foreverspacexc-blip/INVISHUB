@@ -1,0 +1,763 @@
+--// MATH MURDER AUTO SCRIPT
+--// Auto Answer (+,-,x,/) | Auto Farm | Anti-AFK | Speed | ESP Coins
+
+local Players      = game:GetService("Players")
+local RunService   = game:GetService("RunService")
+local UIS          = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local RS           = game:GetService("ReplicatedStorage")
+local TP           = game:GetService("TeleportService")
+local VIM          = game:GetService("VirtualInputManager")
+
+local LP   = Players.LocalPlayer
+local PGui = LP:WaitForChild("PlayerGui")
+
+--==========================================================
+-- CONFIG
+--==========================================================
+local Cfg = {
+    AutoAnswer   = false,
+    AutoFarm     = false,
+    AntiAFK      = false,
+    SpeedBoost   = false,
+    SpeedValue   = 28,
+    ESPCoins     = false,
+    AutoDaily    = false,
+    AutoProximity= false,
+}
+
+--==========================================================
+-- STATS
+--==========================================================
+local Stats = {
+    Correct  = 0,
+    Wrong    = 0,
+    Streak   = 0,
+    BestStreak = 0,
+    CoinsEst = 0,
+    StartTime= os.clock(),
+}
+
+--==========================================================
+-- MATH SOLVER
+--==========================================================
+local function SolveMath(a, op, b)
+    a = tonumber(a); b = tonumber(b)
+    if not a or not b then return nil end
+    op = op:gsub("%s","")
+    if op == "+" then return a + b
+    elseif op == "-" then return a - b
+    elseif op == "x" or op == "*" or op == "X" or op == "times" or op == "x" then return a * b
+    elseif op == "/" or op == "div" then
+        if b == 0 then return nil end
+        local r = a / b
+        return math.floor(r * 1000 + 0.5) / 1000
+    end
+    return nil
+end
+
+-- Parse math expression from any text
+local function ParseQuestion(text)
+    if not text or text == "" then return nil end
+    text = text:gsub("[Xx×]", "*"):gsub("[÷]", "/"):gsub("=.*$",""):gsub("%?","")
+    -- Match: number op number (handles negatives and decimals)
+    local a, op, b = text:match("(-?%d+%.?%d*)%s*([%+%-%*/])%s*(-?%d+%.?%d*)")
+    if a and op and b then
+        local ans = SolveMath(a, op, b)
+        if ans then
+            -- Return integer if whole number
+            if ans == math.floor(ans) then return tostring(math.floor(ans)) end
+            return tostring(ans)
+        end
+    end
+    return nil
+end
+
+--==========================================================
+-- QUESTION DETECTION  (multi-layer)
+--==========================================================
+local LastQuestion = ""
+local LastAnswer   = ""
+local _ansRemote   = nil
+local _ansTextBox  = nil
+
+-- Layer 1: scan all TextLabels in PlayerGui
+local function ScanGuiForQuestion()
+    for _, v in ipairs(PGui:GetDescendants()) do
+        if (v:IsA("TextLabel") or v:IsA("TextButton")) and v.Visible then
+            local t = v.Text
+            if t and (t:find("%d") and (t:find("%+") or t:find("%-") or t:find("[Xx%*]") or t:find("/"))) then
+                local ans = ParseQuestion(t)
+                if ans then return ans, t, v end
+            end
+        end
+    end
+    return nil
+end
+
+-- Layer 2: watch for Attribute changes on character/player
+local function WatchAttributes()
+    local function Check(obj)
+        if not obj then return end
+        local q = obj:GetAttribute("CurrentQuestion") or obj:GetAttribute("Question") or obj:GetAttribute("MathQuestion")
+        if q then
+            local ans = ParseQuestion(tostring(q))
+            if ans then return ans, tostring(q) end
+        end
+    end
+    return Check(LP) or Check(LP.Character)
+end
+
+-- Layer 3: find TextBox that accepts answer
+local function FindAnswerBox()
+    for _, v in ipairs(PGui:GetDescendants()) do
+        if v:IsA("TextBox") and v.Visible then
+            local name = v.Name:lower()
+            if name:find("answer") or name:find("input") or name:find("math") or
+               name:find("type") or name:find("guess") or name:find("text") then
+                return v
+            end
+        end
+    end
+    -- Fallback: any focused or visible textbox
+    for _, v in ipairs(PGui:GetDescendants()) do
+        if v:IsA("TextBox") and v.Visible and v.Parent and v.Parent.Visible then
+            return v
+        end
+    end
+    return nil
+end
+
+-- Layer 4: hook __namecall to auto-capture the answer remote
+local _capturedRemotes = {}
+local _mt = getrawmetatable and getrawmetatable(game)
+if _mt then
+    local _old = _mt.__namecall
+    pcall(function()
+        setreadonly(_mt, false)
+        _mt.__namecall = newcclosure(function(self, ...)
+            local m = getnamecallmethod()
+            if (m == "FireServer" or m == "InvokeServer") and self:IsA("RemoteEvent") or self:IsA("RemoteFunction") then
+                local name = self.Name:lower()
+                if name:find("answer") or name:find("submit") or name:find("math") or name:find("guess") then
+                    _ansRemote = self
+                    _capturedRemotes[name] = { remote = self, args = {...}, method = m }
+                end
+            end
+            return _old(self, ...)
+        end)
+        setreadonly(_mt, true)
+    end)
+end
+
+--==========================================================
+-- SUBMIT ANSWER
+--==========================================================
+local function SubmitAnswer(answer)
+    if not answer then return false end
+    local submitted = false
+
+    -- Method A: fire captured answer remote
+    if _ansRemote then
+        pcall(function()
+            if _ansRemote:IsA("RemoteEvent") then
+                _ansRemote:FireServer(answer)
+                _ansRemote:FireServer(tonumber(answer))
+            else
+                _ansRemote:InvokeServer(answer)
+            end
+            submitted = true
+        end)
+    end
+
+    for _, data in pairs(_capturedRemotes) do
+        pcall(function()
+            if data.method == "FireServer" then
+                data.remote:FireServer(answer)
+                data.remote:FireServer(tonumber(answer))
+            else
+                data.remote:InvokeServer(answer)
+            end
+            submitted = true
+        end)
+    end
+
+    -- Method B: search for any answer remote in RS
+    if not submitted then
+        for _, obj in ipairs(RS:GetDescendants()) do
+            if (obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction")) then
+                local n = obj.Name:lower()
+                if n:find("answer") or n:find("submit") or n:find("guess") or n:find("math") then
+                    pcall(function()
+                        if obj:IsA("RemoteEvent") then
+                            obj:FireServer(answer)
+                            obj:FireServer(tonumber(answer))
+                        else
+                            obj:InvokeServer(answer)
+                        end
+                        submitted = true
+                    end)
+                end
+            end
+        end
+    end
+
+    -- Method C: type into TextBox + simulate Enter
+    local box = FindAnswerBox()
+    if box then
+        pcall(function()
+            box:CaptureFocus()
+            box.Text = tostring(answer)
+            -- Fire FocusLost with enterPressed = true
+            local ok = pcall(function() box.FocusLost:Fire(true) end)
+            if not ok then
+                -- Simulate Enter key press
+                if VIM then
+                    VIM:SendKeyEvent(true,  Enum.KeyCode.Return, false, game)
+                    VIM:SendKeyEvent(false, Enum.KeyCode.Return, false, game)
+                end
+            end
+            submitted = true
+        end)
+    end
+
+    -- Method D: simulate keyboard typing character by character
+    if not submitted or box then
+        pcall(function()
+            local b = FindAnswerBox()
+            if not b then return end
+            b:CaptureFocus()
+            b.Text = ""
+            task.wait(0.05)
+            b.Text = tostring(answer)
+            task.wait(0.05)
+            if VIM then
+                VIM:SendKeyEvent(true,  Enum.KeyCode.Return, false, game)
+                task.wait(0.03)
+                VIM:SendKeyEvent(false, Enum.KeyCode.Return, false, game)
+            end
+        end)
+    end
+
+    return submitted
+end
+
+--==========================================================
+-- AUTO ANSWER LOOP
+--==========================================================
+local _lastAnsweredQ = ""
+local _answerCooldown = 0
+
+task.spawn(function()
+    while true do
+        task.wait(0.08)
+        if not Cfg.AutoAnswer then continue end
+
+        local now = os.clock()
+        if now < _answerCooldown then continue end
+
+        -- Try all detection layers
+        local answer, questionText = nil, nil
+
+        -- Layer 1: GUI scan
+        local a, qt = ScanGuiForQuestion()
+        if a then answer = a; questionText = qt end
+
+        -- Layer 2: Attributes
+        if not answer then
+            local a2, qt2 = WatchAttributes()
+            if a2 then answer = a2; questionText = qt2 end
+        end
+
+        if answer and questionText ~= _lastAnsweredQ then
+            _lastAnsweredQ = questionText
+            local ok = SubmitAnswer(answer)
+            if ok then
+                Stats.Correct   = Stats.Correct + 1
+                Stats.Streak    = Stats.Streak + 1
+                Stats.CoinsEst  = Stats.CoinsEst + 10
+                if Stats.Streak > Stats.BestStreak then Stats.BestStreak = Stats.Streak end
+                _answerCooldown = now + 0.25
+                UpdateStats()
+            end
+        end
+    end
+end)
+
+--==========================================================
+-- AUTO FARM — collect proximity prompts, daily reward, coins
+--==========================================================
+local function FireAllProximityPrompts()
+    for _, v in ipairs(workspace:GetDescendants()) do
+        if v:IsA("ProximityPrompt") then
+            pcall(function()
+                -- Only fire non-purchase prompts
+                if v.RequiresLineOfSight == false or (v.Parent and v.Parent.Name:lower():find("coin") or v.Parent.Name:lower():find("reward") or v.Parent.Name:lower():find("daily") or v.Parent.Name:lower():find("bonus")) then
+                    local evt = RS:FindFirstChild("ProximityPromptService") or game:GetService("ProximityPromptService")
+                    fireproximityprompt(v)
+                end
+            end)
+        end
+    end
+end
+
+local function ClickDailyReward()
+    for _, v in ipairs(PGui:GetDescendants()) do
+        if (v:IsA("TextButton") or v:IsA("ImageButton")) and v.Visible then
+            local n = v.Name:lower()
+            local t = (v:IsA("TextButton") and v.Text:lower()) or ""
+            if n:find("daily") or n:find("reward") or n:find("claim") or n:find("collect") or n:find("spin") or
+               t:find("daily") or t:find("claim") or t:find("collect") then
+                pcall(function() v.MouseButton1Click:Fire() end)
+                task.wait(0.1)
+            end
+        end
+    end
+end
+
+task.spawn(function()
+    while true do
+        task.wait(0.3)
+        if not Cfg.AutoFarm then continue end
+
+        -- Auto daily reward
+        if Cfg.AutoDaily then
+            ClickDailyReward()
+        end
+
+        -- Auto proximity prompts
+        if Cfg.AutoProximity then
+            FireAllProximityPrompts()
+        end
+
+        -- Auto-answer is already handled above; farm just runs support
+        task.wait(0.7)
+    end
+end)
+
+--==========================================================
+-- ANTI-AFK
+--==========================================================
+local _afkConn = nil
+task.spawn(function()
+    while true do
+        task.wait(60)
+        if not Cfg.AntiAFK then continue end
+        pcall(function()
+            local hum = LP.Character and LP.Character:FindFirstChildOfClass("Humanoid")
+            if hum then hum.Jump = true end
+        end)
+        -- Simulate mouse movement to prevent Roblox AFK kick
+        pcall(function()
+            if VIM then
+                VIM:SendMouseMoveEvent(1, 1, game)
+                VIM:SendMouseMoveEvent(-1, -1, game)
+            end
+        end)
+    end
+end)
+
+--==========================================================
+-- SPEED BOOST (restore correct speed for game)
+--==========================================================
+local _speedConn = nil
+local function SetSpeed(on)
+    if _speedConn then _speedConn:Disconnect(); _speedConn = nil end
+    if on then
+        _speedConn = RunService.Heartbeat:Connect(function()
+            pcall(function()
+                local hum = LP.Character and LP.Character:FindFirstChildOfClass("Humanoid")
+                if hum and hum.WalkSpeed ~= Cfg.SpeedValue then
+                    hum.WalkSpeed = Cfg.SpeedValue
+                end
+            end)
+        end)
+    else
+        pcall(function()
+            local hum = LP.Character and LP.Character:FindFirstChildOfClass("Humanoid")
+            if hum then hum.WalkSpeed = 16 end
+        end)
+    end
+end
+
+LP.CharacterAdded:Connect(function()
+    task.wait(0.5)
+    if Cfg.SpeedBoost then SetSpeed(true) end
+end)
+
+--==========================================================
+-- ESP COINS  (Drawing highlights on coin parts)
+--==========================================================
+local ESPDrawings = {}
+
+local function ClearESP()
+    for _, d in pairs(ESPDrawings) do pcall(function() d:Remove() end) end
+    ESPDrawings = {}
+end
+
+local function UpdateESP()
+    if not Cfg.ESPCoins then ClearESP(); return end
+    local cam = workspace.CurrentCamera
+    for _, v in ipairs(workspace:GetDescendants()) do
+        if v:IsA("BasePart") then
+            local n = v.Name:lower()
+            local par = v.Parent and v.Parent.Name:lower() or ""
+            if n:find("coin") or n:find("gold") or n:find("reward") or par:find("coin") or par:find("pickup") then
+                if not ESPDrawings[v] then
+                    local lbl = Drawing.new("Text")
+                    lbl.Size = 14; lbl.Font = 2; lbl.Center = true; lbl.Outline = true
+                    lbl.Color = Color3.fromRGB(255, 215, 0); lbl.Text = "COIN"
+                    lbl.Visible = true
+                    ESPDrawings[v] = lbl
+                end
+                local sp, onS = cam:WorldToViewportPoint(v.Position)
+                if onS then
+                    ESPDrawings[v].Visible  = true
+                    ESPDrawings[v].Position = Vector2.new(sp.X, sp.Y - 14)
+                else
+                    ESPDrawings[v].Visible = false
+                end
+            end
+        end
+    end
+end
+
+RunService.RenderStepped:Connect(function()
+    pcall(UpdateESP)
+end)
+
+--==========================================================
+-- STATS LABEL UPDATE
+--==========================================================
+function UpdateStats()
+    -- updated by GUI below
+    if _statsLbl and _statsLbl.Parent then
+        local elapsed = math.floor(os.clock() - Stats.StartTime)
+        local mins = math.floor(elapsed / 60)
+        local secs = elapsed % 60
+        _statsLbl.Text = string.format(
+            "Correct: %d   Wrong: %d\nStreak: %d   Best: %d\nCoins Est: %d\nTime: %02d:%02d",
+            Stats.Correct, Stats.Wrong, Stats.Streak, Stats.BestStreak,
+            Stats.CoinsEst, mins, secs
+        )
+    end
+end
+
+-- Continuously update stats display
+task.spawn(function()
+    while true do task.wait(1); pcall(UpdateStats) end
+end)
+
+--==========================================================
+-- GUI  (Collapsible + Animated, dark theme)
+--==========================================================
+local Parent = (gethui and gethui()) or PGui
+local Old = Parent:FindFirstChild("MathMurder_AutoGUI")
+if Old then Old:Destroy() end
+
+local EXPANDED_H = 430
+local COLLAPSED_H = 46
+local GUI_W = 310
+
+-- Colors
+local C_BG    = Color3.fromRGB(12, 13, 18)
+local C_PANEL = Color3.fromRGB(18, 20, 28)
+local C_CARD  = Color3.fromRGB(24, 26, 36)
+local C_HOVER = Color3.fromRGB(32, 34, 46)
+local C_GOLD  = Color3.fromRGB(255, 204, 0)
+local C_GREEN = Color3.fromRGB(58, 210, 130)
+local C_RED   = Color3.fromRGB(225, 60, 75)
+local C_BLUE  = Color3.fromRGB(80, 155, 255)
+local C_TEXT  = Color3.fromRGB(235, 237, 248)
+local C_SUB   = Color3.fromRGB(130, 133, 155)
+local C_STROKE= Color3.fromRGB(38, 40, 55)
+
+local function Tw(obj, t, props)
+    TweenService:Create(obj, TweenInfo.new(t, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), props):Play()
+end
+local function Rnd(obj, r) local u=Instance.new("UICorner"); u.CornerRadius=UDim.new(0,r or 8); u.Parent=obj end
+local function Str(obj, col, th)
+    local s=Instance.new("UIStroke"); s.Color=col or C_STROKE; s.Thickness=th or 1
+    s.ApplyStrokeMode=Enum.ApplyStrokeMode.Border; s.Parent=obj; return s
+end
+local function Lbl(par, txt, sz, col, ax)
+    local l=Instance.new("TextLabel"); l.BackgroundTransparency=1; l.Text=txt; l.TextSize=sz or 13
+    l.TextColor3=col or C_TEXT; l.Font=Enum.Font.GothamSemibold; l.TextXAlignment=ax or Enum.TextXAlignment.Left
+    l.TextWrapped=true; l.Parent=par; return l
+end
+
+local ScreenGui=Instance.new("ScreenGui")
+ScreenGui.Name="MathMurder_AutoGUI"; ScreenGui.ResetOnSpawn=false
+ScreenGui.IgnoreGuiInset=true; ScreenGui.ZIndexBehavior=Enum.ZIndexBehavior.Sibling
+ScreenGui.Parent=Parent
+
+-- Main frame
+local Main=Instance.new("Frame")
+Main.Name="Main"; Main.Size=UDim2.fromOffset(GUI_W, EXPANDED_H)
+Main.Position=UDim2.new(0,12,0.5,-(EXPANDED_H/2))
+Main.BackgroundColor3=C_BG; Main.ClipsDescendants=true; Main.Parent=ScreenGui
+Rnd(Main,12); Str(Main,C_STROKE,1.2)
+
+-- Drag
+do
+    local d,ds,sp=false
+    Main.InputBegan:Connect(function(i)
+        if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then
+            d=true; ds=i.Position; sp=Main.Position
+        end
+    end)
+    UIS.InputChanged:Connect(function(i)
+        if d then local dl=i.Position-ds
+            Main.Position=UDim2.new(sp.X.Scale,sp.X.Offset+dl.X,sp.Y.Scale,sp.Y.Offset+dl.Y)
+        end
+    end)
+    UIS.InputEnded:Connect(function(i)
+        if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then d=false end
+    end)
+end
+
+-- ── Title Bar ──
+local TitleBar=Instance.new("Frame")
+TitleBar.Size=UDim2.new(1,0,0,46); TitleBar.BackgroundColor3=C_PANEL; TitleBar.BorderSizePixel=0; TitleBar.Parent=Main
+local TBR=Instance.new("UICorner"); TBR.CornerRadius=UDim.new(0,12); TBR.Parent=TitleBar
+local TBF=Instance.new("Frame"); TBF.Size=UDim2.new(1,0,0,12); TBF.Position=UDim2.new(0,0,1,-12)
+TBF.BackgroundColor3=C_PANEL; TBF.BorderSizePixel=0; TBF.Parent=TitleBar
+
+-- Gold accent line
+local Accent=Instance.new("Frame")
+Accent.Size=UDim2.new(1,0,0,2); Accent.Position=UDim2.new(0,0,1,-2)
+Accent.BackgroundColor3=C_GOLD; Accent.BorderSizePixel=0; Accent.Parent=TitleBar
+
+-- Title icon + text
+local Icon=Lbl(TitleBar,"∑",18,C_GOLD,Enum.TextXAlignment.Center)
+Icon.Font=Enum.Font.GothamBlack; Icon.Size=UDim2.fromOffset(30,46); Icon.Position=UDim2.fromOffset(10,0)
+
+local Title=Lbl(TitleBar,"MATH MURDER AUTO",13,C_TEXT)
+Title.Font=Enum.Font.GothamBlack; Title.Position=UDim2.fromOffset(44,0); Title.Size=UDim2.fromOffset(170,46)
+
+-- Live status indicator
+local StatusDot=Instance.new("Frame")
+StatusDot.Size=UDim2.fromOffset(8,8); StatusDot.Position=UDim2.fromOffset(44,32)
+StatusDot.BackgroundColor3=C_SUB; StatusDot.Parent=TitleBar; Rnd(StatusDot,4)
+
+local StatusLbl=Lbl(TitleBar,"idle",10,C_SUB)
+StatusLbl.Position=UDim2.fromOffset(56,28); StatusLbl.Size=UDim2.fromOffset(100,16)
+
+-- Collapse button
+local CollapseBtn=Instance.new("TextButton")
+CollapseBtn.Size=UDim2.fromOffset(30,30); CollapseBtn.Position=UDim2.new(1,-70,0.5,-15)
+CollapseBtn.BackgroundColor3=C_CARD; CollapseBtn.Text="−"; CollapseBtn.TextColor3=C_TEXT
+CollapseBtn.TextSize=16; CollapseBtn.Font=Enum.Font.GothamBold; CollapseBtn.AutoButtonColor=false; CollapseBtn.Parent=TitleBar
+Rnd(CollapseBtn,7); Str(CollapseBtn,C_STROKE,1)
+
+-- Close button
+local CloseBtn=Instance.new("TextButton")
+CloseBtn.Size=UDim2.fromOffset(30,30); CloseBtn.Position=UDim2.new(1,-34,0.5,-15)
+CloseBtn.BackgroundColor3=C_CARD; CloseBtn.Text="x"; CloseBtn.TextColor3=C_RED
+CloseBtn.TextSize=13; CloseBtn.Font=Enum.Font.GothamBold; CloseBtn.AutoButtonColor=false; CloseBtn.Parent=TitleBar
+Rnd(CloseBtn,7); Str(CloseBtn,C_STROKE,1)
+
+CloseBtn.MouseButton1Click:Connect(function() Main.Visible=false end)
+
+-- Collapse animation
+local _collapsed=false
+CollapseBtn.MouseButton1Click:Connect(function()
+    _collapsed=not _collapsed
+    local targetH=_collapsed and COLLAPSED_H or EXPANDED_H
+    CollapseBtn.Text=_collapsed and "+" or "−"
+
+    -- Animate: tween the frame height
+    TweenService:Create(Main,
+        TweenInfo.new(0.35, Enum.EasingStyle.Back, _collapsed and Enum.EasingDirection.In or Enum.EasingDirection.Out),
+        {Size=UDim2.fromOffset(GUI_W, targetH)}
+    ):Play()
+
+    -- Rotate icon subtly
+    TweenService:Create(CollapseBtn,
+        TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+        {TextColor3=_collapsed and C_GOLD or C_TEXT}
+    ):Play()
+end)
+
+-- ── Scroll content ──
+local Scroll=Instance.new("ScrollingFrame")
+Scroll.Size=UDim2.new(1,0,1,-50); Scroll.Position=UDim2.fromOffset(0,50)
+Scroll.BackgroundTransparency=1; Scroll.BorderSizePixel=0
+Scroll.ScrollBarThickness=3; Scroll.ScrollBarImageColor3=C_GOLD
+Scroll.CanvasSize=UDim2.new(0,0,0,0); Scroll.AutomaticCanvasSize=Enum.AutomaticSize.Y
+Scroll.Parent=Main
+
+local SLayout=Instance.new("UIListLayout")
+SLayout.Padding=UDim.new(0,6); SLayout.SortOrder=Enum.SortOrder.LayoutOrder; SLayout.Parent=Scroll
+local SPad=Instance.new("UIPadding")
+SPad.PaddingTop=UDim.new(0,8); SPad.PaddingLeft=UDim.new(0,8); SPad.PaddingRight=UDim.new(0,8); SPad.PaddingBottom=UDim.new(0,8)
+SPad.Parent=Scroll
+
+-- Section header helper
+local function Section(text)
+    local H=Instance.new("Frame"); H.Size=UDim2.new(1,0,0,20); H.BackgroundTransparency=1; H.Parent=Scroll
+    local bar=Instance.new("Frame"); bar.Size=UDim2.fromOffset(2,12); bar.Position=UDim2.fromOffset(0,4)
+    bar.BackgroundColor3=C_GOLD; bar.BorderSizePixel=0; bar.Parent=H; Rnd(bar,2)
+    local l=Lbl(H,text,10,C_SUB); l.Font=Enum.Font.GothamBold; l.Position=UDim2.fromOffset(8,0); l.Size=UDim2.new(1,-8,1,0)
+end
+
+-- Toggle helper (animated)
+local function Toggle(label, desc, default, onChange)
+    local val=default or false
+    local Row=Instance.new("Frame"); Row.Size=UDim2.new(1,0,0,desc and 52 or 42)
+    Row.BackgroundColor3=C_CARD; Row.Parent=Scroll; Rnd(Row,8); Str(Row,C_STROKE,1)
+
+    local L=Lbl(Row,label,13,C_TEXT); L.Position=UDim2.fromOffset(12,desc and 7 or 0); L.Size=UDim2.new(1,-76,0,18)
+    L.Font=Enum.Font.GothamSemibold
+
+    if desc then
+        local D=Lbl(Row,desc,10,C_SUB); D.Position=UDim2.fromOffset(12,27); D.Size=UDim2.new(1,-76,0,18)
+    end
+
+    -- Slot-style toggle (pill)
+    local Track=Instance.new("Frame"); Track.Size=UDim2.fromOffset(42,22); Track.Position=UDim2.new(1,-54,0.5,-11)
+    Track.BackgroundColor3=val and C_GREEN or Color3.fromRGB(38,40,55); Track.Parent=Row; Rnd(Track,20)
+    local Knob=Instance.new("Frame"); Knob.Size=UDim2.fromOffset(16,16)
+    Knob.Position=val and UDim2.new(1,-19,0.5,-8) or UDim2.fromOffset(3,3)
+    Knob.BackgroundColor3=Color3.fromRGB(255,255,255); Knob.Parent=Track; Rnd(Knob,20)
+    local TBtn=Instance.new("TextButton"); TBtn.Size=UDim2.fromScale(1,1); TBtn.BackgroundTransparency=1; TBtn.Text=""; TBtn.Parent=Track
+
+    TBtn.MouseButton1Click:Connect(function()
+        val=not val
+        Tw(Track,0.15,{BackgroundColor3=val and C_GREEN or Color3.fromRGB(38,40,55)})
+        Tw(Knob,0.15,{Position=val and UDim2.new(1,-19,0.5,-8) or UDim2.fromOffset(3,3)})
+        if onChange then pcall(onChange,val) end
+    end)
+
+    -- Hover effect
+    Row.MouseEnter:Connect(function() Tw(Row,0.1,{BackgroundColor3=C_HOVER}) end)
+    Row.MouseLeave:Connect(function() Tw(Row,0.1,{BackgroundColor3=C_CARD}) end)
+
+    return {Get=function() return val end, Set=function(_,v)
+        val=v; Tw(Track,0.15,{BackgroundColor3=v and C_GREEN or Color3.fromRGB(38,40,55)})
+        Tw(Knob,0.15,{Position=v and UDim2.new(1,-19,0.5,-8) or UDim2.fromOffset(3,3)})
+        if onChange then pcall(onChange,v) end
+    end}
+end
+
+-- Slider helper
+local function Slider(label, min, max, default, onChange)
+    local val=default
+    local H=Instance.new("Frame"); H.Size=UDim2.new(1,0,0,58); H.BackgroundColor3=C_CARD; H.Parent=Scroll; Rnd(H,8); Str(H,C_STROKE,1)
+    local L=Lbl(H,label,12,C_TEXT); L.Position=UDim2.fromOffset(12,6); L.Size=UDim2.new(1,-70,0,16)
+    local VL=Lbl(H,tostring(val),11,C_GOLD,Enum.TextXAlignment.Right); VL.Position=UDim2.new(1,-58,0,6); VL.Size=UDim2.fromOffset(48,16)
+    local TBG=Instance.new("Frame"); TBG.Size=UDim2.new(1,-24,0,5); TBG.Position=UDim2.fromOffset(12,36)
+    TBG.BackgroundColor3=C_STROKE; TBG.Parent=H; Rnd(TBG,4)
+    local Fill=Instance.new("Frame"); Fill.BackgroundColor3=C_GOLD; Fill.Size=UDim2.new((val-min)/(max-min),0,1,0); Fill.Parent=TBG; Rnd(Fill,4)
+    local Knob=Instance.new("Frame"); Knob.Size=UDim2.fromOffset(11,11); Knob.AnchorPoint=Vector2.new(0.5,0.5)
+    Knob.Position=UDim2.new((val-min)/(max-min),0,0.5,0); Knob.BackgroundColor3=C_TEXT; Knob.Parent=TBG; Rnd(Knob,20)
+    local drg=false
+    local function Upd(px)
+        local pct=math.clamp((px-TBG.AbsolutePosition.X)/TBG.AbsoluteSize.X,0,1)
+        val=math.floor(min+(max-min)*pct)
+        Fill.Size=UDim2.new(pct,0,1,0); Knob.Position=UDim2.new(pct,0,0.5,0); VL.Text=tostring(val)
+        if onChange then onChange(val) end
+    end
+    TBG.InputBegan:Connect(function(i) if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then drg=true; Upd(i.Position.X) end end)
+    UIS.InputChanged:Connect(function(i) if drg and (i.UserInputType==Enum.UserInputType.MouseMovement or i.UserInputType==Enum.UserInputType.Touch) then Upd(i.Position.X) end end)
+    UIS.InputEnded:Connect(function(i) if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then drg=false end end)
+end
+
+-- Info box for live question
+local QuestionBox=Instance.new("Frame")
+QuestionBox.Size=UDim2.new(1,0,0,58); QuestionBox.BackgroundColor3=Color3.fromRGB(18,22,15)
+QuestionBox.Parent=Scroll; Rnd(QuestionBox,8)
+Str(QuestionBox,Color3.fromRGB(58,110,30),1.5)
+local QLbl=Lbl(QuestionBox,"Waiting for question...",11,Color3.fromRGB(140,230,100),Enum.TextXAlignment.Center)
+QLbl.Font=Enum.Font.GothamBold; QLbl.Position=UDim2.fromOffset(0,4); QLbl.Size=UDim2.new(1,0,0,22)
+local AnsLbl=Lbl(QuestionBox,"Answer: —",14,C_GOLD,Enum.TextXAlignment.Center)
+AnsLbl.Font=Enum.Font.GothamBlack; AnsLbl.Position=UDim2.fromOffset(0,26); AnsLbl.Size=UDim2.new(1,0,0,26)
+
+-- Stats box
+local StatsBox=Instance.new("Frame")
+StatsBox.Size=UDim2.new(1,0,0,80); StatsBox.BackgroundColor3=C_CARD; StatsBox.Parent=Scroll; Rnd(StatsBox,8); Str(StatsBox,C_STROKE,1)
+
+_statsLbl=Lbl(StatsBox,"Loading stats...",11,C_SUB,Enum.TextXAlignment.Left)
+_statsLbl.Font=Enum.Font.Gotham; _statsLbl.Position=UDim2.fromOffset(12,6); _statsLbl.Size=UDim2.new(1,-24,1,-12)
+_statsLbl.LineHeight=1.4
+
+-- Section: MAIN
+Section("MAIN FEATURES")
+
+Toggle("Auto Answer", "Solves +  -  x  /  automatically", false, function(v)
+    Cfg.AutoAnswer=v
+    StatusDot.BackgroundColor3= v and C_GREEN or C_SUB
+    StatusLbl.Text= v and "auto answer ON" or "idle"
+    StatusLbl.TextColor3= v and C_GREEN or C_SUB
+end)
+
+Toggle("Auto Farm", "Auto collect rewards & dailies", false, function(v)
+    Cfg.AutoFarm=v
+end)
+
+Section("EXTRAS")
+
+Toggle("Auto Proximity Prompts", "Auto-interact with Frog, boards, etc.", false, function(v)
+    Cfg.AutoProximity=v
+end)
+
+Toggle("Auto Daily Reward", "Clicks claim/daily buttons", false, function(v)
+    Cfg.AutoDaily=v
+end)
+
+Toggle("Coin ESP", "Highlights coin pickups in world", false, function(v)
+    Cfg.ESPCoins=v
+    if not v then ClearESP() end
+end)
+
+Section("PLAYER")
+
+Toggle("Anti-AFK", "Prevents auto-kick", false, function(v) Cfg.AntiAFK=v end)
+
+Toggle("Speed Boost", "Custom walk speed", false, function(v)
+    Cfg.SpeedBoost=v; SetSpeed(v)
+end)
+
+Slider("Walk Speed", 8, 80, 28, function(v) Cfg.SpeedValue=v; if Cfg.SpeedBoost then SetSpeed(true) end end)
+
+Section("QUESTION MONITOR")
+
+-- Question monitor is the QuestionBox (already inserted above in order)
+-- But scroll order matters; we'll force it at bottom by moving it
+QuestionBox.Parent=nil
+
+local BotSec=Instance.new("Frame"); BotSec.Size=UDim2.new(1,0,0,0); BotSec.AutomaticSize=Enum.AutomaticSize.Y
+BotSec.BackgroundTransparency=1; BotSec.Parent=Scroll
+
+local BSL=Instance.new("UIListLayout"); BSL.Padding=UDim.new(0,5); BSL.Parent=BotSec
+QuestionBox.Parent=BotSec
+StatsBox.Parent=BotSec
+
+-- ── Live question display hook ──
+RunService.Heartbeat:Connect(function()
+    if not Cfg.AutoAnswer then return end
+    local ans, qt = ScanGuiForQuestion()
+    if ans then
+        QLbl.Text = tostring(qt)
+        AnsLbl.Text = "Answer: " .. ans
+        AnsLbl.TextColor3 = C_GOLD
+    else
+        QLbl.Text = "Watching for question..."
+        AnsLbl.Text = "Answer: —"
+        AnsLbl.TextColor3 = C_SUB
+    end
+end)
+
+-- ── Keyboard shortcut: RightAlt = toggle GUI ──
+UIS.InputBegan:Connect(function(inp, gp)
+    if gp then return end
+    if inp.KeyCode==Enum.KeyCode.RightAlt or inp.KeyCode==Enum.KeyCode.RightShift then
+        Main.Visible=not Main.Visible
+    end
+end)
+
+-- Animate in on load
+Main.Size=UDim2.fromOffset(GUI_W, 0)
+Tw(Main, 0.45, {Size=UDim2.fromOffset(GUI_W, EXPANDED_H)})
+
+print("[Math Murder Auto] Loaded — RightAlt/RShift = toggle GUI")
